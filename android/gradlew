@@ -1,75 +1,41 @@
 #!/usr/bin/env sh
 ##############################################################################
 ##
-##  Gradle start up script for Un*x
+##  gradlew startup script for Gradle
 ##
 ##############################################################################
 
+# Attempt to set APP_HOME to the directory of this script, platform independent
+case "${0}" in
+  -*) ;;
+  /*) ;;
+  *) case "${0}" in
+     */*) ;;
+     *) SCRIPT_FILENAME="${BASH_SOURCE[0]}"
+        if ([ -n "${ZSH_VERSION}" ]) then
+          SCRIPT_FILENAME="/${SCRIPT_FILENAME}"
+        else
+          SCRIPT_FILENAME="${SCRIPT_FILENAME}"
+        fi
+        ;;
+     esac
+     SCRIPT_FILENAME="$(cd "$(dirname "${SCRIPT_FILENAME}")" && pwd)/$(basename "${SCRIPT_FILENAME}")"
+     ;;
+esac
+
+APP_HOME="${SCRIPT_FILENAME%/*}"
+
 # Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
-# For example, to debug the Gradle client JVM:
-#   GRADLE_OPTS="-Xdebug -Xrunjdwp:transport=dt_socket,server=y,suspend=n,address=5005"
+DEFAULT_JVM_OPTS='"-Xmx64m" "-Xms64m"'
 
-# Initialize variables
-APP_NAME="Gradle"
-APP_BASE_NAME="gradlew"
+# Use the project's gradle-wrapper.jar
+WRAPPER_JAR="${APP_HOME}/gradle/wrapper/gradle-wrapper.jar"
+WRAPPER_PROPERTIES="${APP_HOME}/gradle/wrapper/gradle-wrapper.properties"
 
-# Determine the Java command to use to start the JVM
-if [ -n "$JAVA_HOME" ] ; then
-    if [ -x "$JAVA_HOME/jre/sh/java" ] ; then
-        JAVACMD="$JAVA_HOME/jre/sh/java"
-    else
-        JAVACMD="$JAVA_HOME/bin/java"
-    fi
-    if [ ! -x "$JAVACMD" ] ; then
-        echo "ERROR: JAVA_HOME is set to an invalid directory: $JAVA_HOME" 1>&2
-        exit 1
-    fi
+# Load the properties from gradle-wrapper.properties
+if [ -f "${WRAPPER_PROPERTIES}" ]; then
+  . "${WRAPPER_PROPERTIES}"
 fi
 
-if [ -z "$JAVACMD" ] ; then
-    if command -v java >/dev/null 2>&1; then
-        JAVACMD="java"
-    else
-        echo "ERROR: JAVA_HOME is not set and no 'java' command could be found in PATH." 1>&2
-        exit 1
-    fi
-fi
-
-# Determine the project base dir
-WRAPPER_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-
-# Load the properties file
-WRAPPER_CONF="${WRAPPER_DIR}/gradle/wrapper/metadata.properties"
-if [ -f "$WRAPPER_CONF" ]; then
-    . "$WRAPPER_CONF"
-fi
-
-# Calculate the classpath
-CLASSPATH="${WRAPPER_DIR}/gradle/wrapper/gradle-wrapper.jar"
-
-# Determine the Java command to use to start the JVM
-if [ -n "$JAVA_HOME" ] ; then
-    if [ -x "$JAVA_HOME/jre/sh/java" ] ; then
-        JAVACMD="$JAVA_HOME/jre/sh/java"
-    else
-        JAVACMD="$JAVA_HOME/bin/java"
-    fi
-    if [ ! -x "$JAVACMD" ] ; then
-        echo "ERROR: JAVA_HOME is set to an invalid directory: $JAVA_HOME" 1>&2
-        exit 1
-    fi
-fi
-
-if [ -z "$JAVACMD" ] ; then
-    if command -v java >/dev/null 2>&1; then
-        JAVACMD="java"
-    else
-        echo "ERROR: JAVA_HOME is not set and no 'java' command could be found in PATH." 1>&2
-        exit 1
-    fi
-fi
-
-# Execute Gradle
-exec "$JAVACMD" $DEFAULT_JVM_OPTS \
-    -classpath "$CLASSPATH" \
-    org.gradle.wrapper.BootstrapMainStarter "$@"
+# Execute Gradle using the wrapper jar
+exec java ${DEFAULT_JVM_OPTS} ${GRADLE_OPTS} -jar "${WRAPPER_JAR}" ${CMD_LINE_ARGS}

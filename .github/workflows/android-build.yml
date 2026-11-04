@@ -20,6 +20,8 @@ permissions:
 env:
   JAVA_VERSION: '17'
   GRADLE_OPTS: '-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs="-Xmx2g"'
+  ANDROID_HOME: ${{ github.workspace }}/android-sdk
+  ANDROID_TOOLS: ${{ github.workspace }}/cmdline-tools
 
 jobs:
   assemble:
@@ -44,6 +46,26 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.5
+
+      - name: Install Android SDK
+        run: |
+          # Install Android SDK command-line tools
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-10406996_latest.zip -O /tmp/android-sdk-tools.zip
+          mkdir -p ${{ env.ANDROID_HOME }}
+          unzip -q /tmp/android-sdk-tools.zip -d /tmp/android-sdk-tools
+          rm /tmp/android-sdk-tools.zip
+          mv /tmp/android-sdk-tools/cmdline-tools ${{ env.ANDROID_TOOLS }}
+          yes | ${{ env.ANDROID_TOOLS }}/bin/sdkmanager --sdk_root=${{ env.ANDROID_HOME }} --update > /dev/null
+          ${{ env.ANDROID_TOOLS }}/bin/sdkmanager --sdk_root=${{ env.ANDROID_HOME }} --install "platform-tools" "platforms;android-35" "build-tools;35.0.0" "cmdline-tools;latest" > /dev/null
+
+      - name: Accept Android licenses
+        run: |
+          yes | ${{ env.ANDROID_TOOLS }}/bin/sdkmanager --sdk_root=${{ env.ANDROID_HOME }} --licenses > /dev/null
+
+      - name: Setup Android environment variables
+        run: |
+          echo "ANDROID_HOME=${{ env.ANDROID_HOME }}" >> $GITHUB_ENV
+          echo "PATH=${{ env.ANDROID_HOME }}/platform-tools:${{ env.ANDROID_HOME }}/build-tools/35.0.0:$PATH" >> $GITHUB_ENV
 
       - name: Decode keystore from secrets
         run: |

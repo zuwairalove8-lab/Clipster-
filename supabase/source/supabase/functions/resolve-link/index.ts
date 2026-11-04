@@ -1,0 +1,1 @@
+../../../../supabase/functions/resolve-link/index.ts

@@ -1,0 +1,23 @@
+deployment:
+  name: resolve-link
+  entrypoint: functions/resolve-link/index.ts
+  config:
+    description: "CyberTrace resolve-link — creates a visit, geolocates IP server-side, returns consent text"
+    verify_jwt: false
+    runtime: edge
+
+deployment:
+  name: upload-capture
+  entrypoint: functions/upload-capture/index.ts
+  config:
+    description: "CyberTrace upload-capture — records a capture row and issues a short-lived signed storage URL"
+    verify_jwt: false
+    runtime: edge
+
+deployment:
+  name: deny-capture
+  entrypoint: functions/deny-capture/index.ts
+  config:
+    description: "CyberTrace deny-capture — marks a permission as denied"
+    verify_jwt: false
+    runtime: edge

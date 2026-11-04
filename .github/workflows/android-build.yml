@@ -14,7 +14,7 @@ permissions:
 
 env:
   JAVA_VERSION: '17'
-  GRADLE_OPTS: '-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs="-Xmx2g"'
+  GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx2g
   ANDROID_HOME: ${{ github.workspace }}/android-sdk
   ANDROID_TOOLS: ${{ github.workspace }}/cmdline-tools
 

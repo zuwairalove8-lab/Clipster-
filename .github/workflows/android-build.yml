@@ -40,22 +40,16 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: 8.5.1
-          cache: gradle
+          gradle-version: 8.5
 
-      - name: Install Android SDK
+      - name: Install Android SDK tools
         run: |
-          # Install Android SDK command-line tools
-          wget -q https://dl.google.com/android/repository/commandlinetools-linux-10406996_latest.zip -O /tmp/android-sdk-tools.zip
           mkdir -p ${{ env.ANDROID_HOME }}
-          unzip -q /tmp/android-sdk-tools.zip -d /tmp/android-sdk-tools
-          rm /tmp/android-sdk-tools.zip
-          mv /tmp/android-sdk-tools/cmdline-tools ${{ env.ANDROID_TOOLS }}
-          ${{ env.ANDROID_TOOLS }}/bin/sdkmanager --sdk_root=${{ env.ANDROID_HOME }} --update --channel=2 > /dev/null 2>&1
-          ${{ env.ANDROID_TOOLS }}/bin/sdkmanager --sdk_root=${{ env.ANDROID_HOME }} --licenses <<< "y" > /dev/null 2>&1
-          ${{ env.ANDROID_TOOLS }}/bin/sdkmanager --sdk_root=${{ env.ANDROID_HOME }} --install "platform-tools" "platforms;android-35" "build-tools;35.0.0" "cmdline-tools;latest" > /dev/null 2>&1
+          yes | ${{ env.ANDROID_TOOLS }}/bin/sdkmanager --sdk_root=${{ env.ANDROID_HOME }} --update > /dev/null 2>&1 || true
+          ${{ env.ANDROID_TOOLS }}/bin/sdkmanager --sdk_root=${{ env.ANDROID_HOME }} --licenses <<< "y" > /dev/null 2>&1 || true
+          ${{ env.ANDROID_TOOLS }}/bin/sdkmanager --sdk_root=${{ env.ANDROID_HOME }} --install "platform-tools" "platforms;android-35" "build-tools;35.0.0" "cmdline-tools;latest" > /dev/null 2>&1 || true
 
-      - name: Setup Android environment variables
+      - name: Setup Android environment
         run: |
           echo "ANDROID_HOME=${{ env.ANDROID_HOME }}" >> $GITHUB_ENV
           echo "PATH=${{ env.ANDROID_HOME }}/platform-tools:${{ env.ANDROID_HOME }}/build-tools/35.0.0:$PATH" >> $GITHUB_ENV

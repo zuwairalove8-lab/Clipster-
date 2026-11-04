@@ -26,7 +26,7 @@ esac
 APP_HOME="${SCRIPT_FILENAME%/*}"
 
 # Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
-DEFAULT_JVM_OPTS='"-Xmx512m" "-Xms256m"'
+DEFAULT_JVM_OPTS='-Xmx1g'
 
 # Use the project's gradle-wrapper.jar
 WRAPPER_JAR="${APP_HOME}/gradle/wrapper/gradle-wrapper.jar"
@@ -38,4 +38,4 @@ if [ -f "${WRAPPER_PROPERTIES}" ]; then
 fi
 
 # Execute Gradle using the wrapper jar
-exec java ${DEFAULT_JVM_OPTS} ${GRADLE_OPTS} -jar "${WRAPPER_JAR}" ${CMD_LINE_ARGS}
+DEFAULT_JVM_OPTS='-Xmx1g'

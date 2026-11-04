@@ -29,6 +29,11 @@ jobs:
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
+        with:
+          # Creates the Pages site on first run when the token is allowed to.
+          # If this step reports 403, enable Pages once in Settings → Pages
+          # (Source: GitHub Actions) and re-run.
+          enablement: true
 
       - name: Upload landing page
         uses: actions/upload-pages-artifact@v3

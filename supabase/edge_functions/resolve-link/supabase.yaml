@@ -1,7 +1,0 @@
-deployment:
-  name: resolve-link
-  entrypoint: functions/resolve-link/index.ts
-  config:
-    description: "CyberTrace resolve-link — creates a visit, geolocates IP server-side, returns consent text"
-    verify_jwt: false
-    runtime: edge

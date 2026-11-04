@@ -1,67 +1,43 @@
-# Supabase Setup — CyberTrace
+# Backend notes
 
-This project uses a single Supabase workspace. Everything below is applied with the
-`supabase` CLI or the `supabase` REST API against the workspace identified by the
-project ID below. No local PostgreSQL copy is required: the Edge Functions run on
-Supabase's sandbox-managed Edge Runtime, and Storage/RLS are configured in SQL.
+Project: `yrmdsvkxpyejpmphfstb` → `https://yrmdsvkxpyejpmphfstb.supabase.co`
 
-Project ID: `yrmdsvkxpyejpmphfstb`
-Authenticator bearer token: set in the Supabase dashboard (`Settings → API`).
+## Objects
 
-## Apply the schema
+| Object | Purpose |
+| --- | --- |
+| `links` | one row per generated tracking link; `config` jsonb holds the five toggles |
+| `visits` | one row per link open; IP, `ip_geo`, `fingerprint`, consent timestamp |
+| `captures` | one row per item asked for; `status` is `granted` or `denied` |
+| `storage.buckets/captures` | private media bucket, `{link_id}/{visit_id}/{type}/{uuid}.{ext}` |
+| `resolve-link` | creates the visit, does the IP lookup server-side, returns consent text |
+| `upload-capture` | validates token+visit, records the row, stores direct or signed uploads |
+| `deny-capture` | records a refusal so it is never re-prompted |
+
+## Rules baked into the SQL
+
+- anon has no grants on the three tables — direct PostgREST calls fail with `42501`.
+- authenticated reads/writes only its own links, and only the visits/captures of those links.
+- `storage.objects` read is scoped to the caller's own link folders.
+- `visits` and `captures` are in the `supabase_realtime` publication.
+
+## Deploying the functions
 
 ```bash
-# 1. authenticate against the workspace
-supabase link --project-ref yrmdsvkxpyejpmphfstb
-supabase db pull                     # pulls the current remote state
-supabase db push                     # pushes local changes to the remote DB
-supabase functions deploy resolve-link upload-capture deny-capture
+supabase functions deploy resolve-link upload-capture deny-capture --no-verify-jwt
 ```
 
-If the CLI cannot reach the workspace (firewall/2FA), fall back to the REST API:
+`verify_jwt` must be **false**: the browser calling them is anonymous. They authenticate
+with the `link_token` and use the service-role key server-side.
 
-```bash
-# SQL migrations
-curl -X POST https://api.supabase.com/projects/yrmdsvkxpyejpmphfstb/rest/v1/schema \
-  -H "Authorization: Bearer <BEARER>" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  --data-urlencode "sql@supabase/migrations/0001_links_and_visits.sql"
+## Environment inside the functions
 
-# Storage bucket
-curl -X POST https://api.supabase.com/projects/yrmdsvkxpyejpmphfstb/rest/v1/storage/buckets \
-  -H "Authorization: Bearer <BEARER>" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"captures","public":false,"file_size_limit":104857600}'
+Supabase injects `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` automatically. The
+functions import nothing beyond Deno built-ins, so there is no import map and no
+bundling step.
 
-# Edge Functions
-curl -X POST https://api.supabase.com/projects/yrmdsvkxpyejpmphfstb/rest/v1/functions \
-  -H "Authorization: Bearer <BEARER>" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"resolve-link","replace":true,"importing":{"import":[]},"dependson":["_extensions/supabase_functions"]}'
-```
+## Re-applying the schema
 
-## Edge Runtime environment
-
-`resolve-link`, `upload-capture`, and `deny-capture` run in Supabase's Edge Runtime.
-They only use built-in modules (`crypto`, `net`, `fetch`), so no `SUPABASE_URL` /
-`SUPABASE_ANON_KEY` need be embedded. They read the token from the `token`
-query parameter and, for `upload-capture`, the `Authorization: Bearer`
-annotation header that Storage intercepts and injects automatically.
-
-## Storage layout
-
-```
-captures/{link_id}/{visit_id}/{capture_type}/{uuid}.{ext}
-```
-
-## Key design notes
-
-- All tables are locked behind RLS: the `anon` role can **only** call the three Edge
-  Functions. The `authenticated` role (investigator) inserts into `links` and
-  selects from `links`, `visits`, `captures`.
-- The three Edge Functions are invisible to the browser: `resolve-link` returns
-  `visit_id`, `config`, and `consent_text`; `upload-capture` returns a short-lived
-  signed URL; `deny-capture` records a refusal so an investigator can see a prompt
-  was sent and declined.
-- IP-based coarse location is performed **server-side** inside `resolve-link`.
-  Never expose a geocoding/geo service API key to the browser.
+`supabase/migrations/0001_init.sql` is idempotent (`create table if not exists`,
+`drop policy if exists` before each `create policy`, guarded publication inserts), so it
+can be re-run against an existing project without data loss. It does **not** drop tables.

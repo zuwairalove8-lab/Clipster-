@@ -1,92 +1,122 @@
 package com.cybertrace.android.ui.theme
 
-import android.app.Activity
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
-import com.cybertrace.android.ui.theme.cyan800
-import com.cybertrace.android.ui.theme.cyan200
-import com.cybertrace.android.ui.theme.cyan500
-import com.cybertrace.android.ui.theme.cyan600
-import com.cybertrace.android.ui.theme.cyan800
-import com.cybertrace.android.ui.theme.grey500
-import com.cybertrace.android.ui.theme.grey600
-import com.cybertrace.android.ui.theme.onBackground
-import com.cybertrace.android.ui.theme.onPrimary
-import com.cybertrace.android.ui.theme.onSurfaceVariantLight
-import com.cybertrace.android.ui.theme.teal200
-import com.cybertrace.android.ui.theme.teal400
-import com.cybertrace.android.ui.theme.teal800
-import com.cybertrace.android.ui.theme.nightBackground
-import com.cybertrace.android.ui.theme.nightSurface
-import com.cybertrace.android.ui.theme.nightSurfaceVariant
-import com.cybertrace.android.ui.theme.surface
-import com.cybertrace.android.ui.theme.surfaceVariant
-import com.cybertrace.android.ui.theme.background
-import com.cybertrace.android.ui.theme.teal400
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.SideEffect
-import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.platform.LocalView
-import androidx.core.view.WindowCompat
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
 
-private val LightThemeColors = lightColorScheme(
-    primary = cyan800,
+// Restrained palette: deep slate surfaces, teal accent.
+val Teal = Color(0xFF2DD4BF)
+val TealDark = Color(0xFF0F766E)
+val TealDeep = Color(0xFF115E59)
+
+val SlateBackground = Color(0xFFF4F6F5)
+val SlateSurface = Color(0xFFFFFFFF)
+val SlateSurfaceVariant = Color(0xFFEDF1F0)
+val SlateText = Color(0xFF0F1720)
+val SlateMuted = Color(0xFF5B6B7C)
+val SlateOutline = Color(0xFFCBD5E1)
+
+val NightBackground = Color(0xFF0B1220)
+val NightSurface = Color(0xFF152135)
+val NightSurfaceVariant = Color(0xFF1E293B)
+val NightText = Color(0xFFE8EEF8)
+val NightMuted = Color(0xFF93A4BD)
+val NightOutline = Color(0xFF24344F)
+
+val WarningAmber = Color(0xFFFBBF24)
+val DangerRed = Color(0xFFE5484D)
+
+private val LightColors = lightColorScheme(
+    primary = TealDark,
     onPrimary = Color.White,
-    primaryContainer = cyan500,
-    onPrimaryContainer = Color.Black,
-    secondary = teal400,
-    onSecondary = Color.Black,
-    secondaryContainer = teal200,
-    onSecondaryContainer = Color.Black,
-    background = background,
-    onBackground = Color.Black,
-    surface = surface,
-    onSurface = Color.Black,
-    surfaceVariant = surfaceVariant,
-    onSurfaceVariant = onSurfaceVariant,
-    error = error,
-    onError = Color.Black,
-    outline = grey500
+    primaryContainer = Color(0xFFCCFBF1),
+    onPrimaryContainer = Color(0xFF042F2E),
+    secondary = Teal,
+    onSecondary = Color(0xFF04211D),
+    secondaryContainer = Color(0xFFD5F5F0),
+    onSecondaryContainer = Color(0xFF042F2E),
+    background = SlateBackground,
+    onBackground = SlateText,
+    surface = SlateSurface,
+    onSurface = SlateText,
+    surfaceVariant = SlateSurfaceVariant,
+    onSurfaceVariant = SlateMuted,
+    outline = SlateOutline,
+    error = DangerRed,
+    onError = Color.White,
 )
 
-private val DarkThemeColors = darkColorScheme(
-    primary = cyan200,
-    onPrimary = Color.Black,
-    primaryContainer = cyan700,
-    onPrimaryContainer = Color.White,
-    secondary = teal600,
-    onSecondary = Color.White,
-    secondaryContainer = teal800,
-    onSecondaryContainer = Color.White,
-    background = nightBackground,
-    onBackground = Color.White,
-    surface = nightSurface,
-    onSurface = Color.White,
-    surfaceVariant = nightSurfaceVariant,
-    onSurfaceVariant = onSurfaceVariant,
-    error = error,
-    onError = Color.White,
-    outline = grey600
+private val DarkColors = darkColorScheme(
+    primary = Teal,
+    onPrimary = Color(0xFF04121B),
+    primaryContainer = TealDeep,
+    onPrimaryContainer = Color(0xFFB8F5EA),
+    secondary = Color(0xFF5EEAD4),
+    onSecondary = Color(0xFF04121B),
+    secondaryContainer = Color(0xFF0F3B36),
+    onSecondaryContainer = Color(0xFFB8F5EA),
+    background = NightBackground,
+    onBackground = NightText,
+    surface = NightSurface,
+    onSurface = NightText,
+    surfaceVariant = NightSurfaceVariant,
+    onSurfaceVariant = NightMuted,
+    outline = NightOutline,
+    error = Color(0xFFFF7B7B),
+    onError = Color(0xFF1A0505),
+)
+
+private val AppTypography = Typography(
+    headlineSmall = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 24.sp,
+        letterSpacing = (-0.3).sp,
+    ),
+    titleLarge = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 19.sp,
+    ),
+    titleMedium = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Medium,
+        fontSize = 16.sp,
+    ),
+    bodyMedium = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontSize = 14.5.sp,
+        lineHeight = 21.sp,
+    ),
+    bodySmall = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontSize = 12.5.sp,
+        lineHeight = 17.sp,
+    ),
+    labelSmall = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Medium,
+        fontSize = 11.sp,
+        letterSpacing = 0.6.sp,
+    ),
 )
 
 @Composable
 fun CyberTraceTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    content: @Composable () -> Unit
+    content: @Composable () -> Unit,
 ) {
-    val colors = if (darkTheme) DarkThemeColors else LightThemeColors
-    val view = LocalView.current
-    if (!view.isInEditMode) {
-        SideEffect {
-            val window = (view.context as Activity).window
-            window.statusBarColor = colors.primary.toArgb()
-            WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !darkTheme
-        }
-    }
     MaterialTheme(
-        colorScheme = colors,
-        content = content
+        colorScheme = if (darkTheme) DarkColors else LightColors,
+        typography = AppTypography,
+        content = content,
     )
 }

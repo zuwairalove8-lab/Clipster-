@@ -1,4 +1,4 @@
-name: Android Debug APK Build
+name: Android Debug APK
 
 on:
   push:
@@ -9,80 +9,62 @@ on:
 
 permissions:
   contents: read
-  issues: write
-  pull-requests: write
-
-env:
-  JAVA_VERSION: '17'
-  GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx2g
-  ANDROID_HOME: ${{ github.workspace }}/android-sdk
-  ANDROID_TOOLS: ${{ github.workspace }}/cmdline-tools
 
 jobs:
   assemble:
-    name: Build Android debug APK
+    name: Build debug APK
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Set up JDK ${{ env.JAVA_VERSION }}
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          java-version: ${{ env.JAVA_VERSION }}
           distribution: temurin
-          cache: gradle
+          java-version: '17'
 
-      - name: Setup Gradle
+      # Gradle is provided by the action (cached, pinned) so the build does not
+      # depend on the committed wrapper downloading anything.
+      - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: 8.5
+          gradle-version: '8.9'
           validate-wrappers: false
 
-      - name: Install Android SDK tools
+      - name: Ensure Android SDK packages
         run: |
-          mkdir -p ${{ env.ANDROID_HOME }}
-          yes | ${{ env.ANDROID_TOOLS }}/bin/sdkmanager --sdk_root=${{ env.ANDROID_HOME }} --update > /dev/null 2>&1 || true
-          ${{ env.ANDROID_TOOLS }}/bin/sdkmanager --sdk_root=${{ env.ANDROID_HOME }} --licenses <<< "y" > /dev/null 2>&1 || true
-          ${{ env.ANDROID_TOOLS }}/bin/sdkmanager --sdk_root=${{ env.ANDROID_HOME }} --install "platform-tools" "platforms;android-35" "build-tools;35.0.0" "cmdline-tools;latest" > /dev/null 2>&1 || true
-
-      - name: Setup Android environment
-        run: |
-          echo "ANDROID_HOME=${{ env.ANDROID_HOME }}" >> $GITHUB_ENV
-          echo "PATH=${{ env.ANDROID_HOME }}/platform-tools:${{ env.ANDROID_HOME }}/build-tools/35.0.0:$PATH" >> $GITHUB_ENV
-
-      - name: Decode keystore from secrets
-        run: |
-          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
-            echo "KEYSTORE_BASE64=${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > /tmp/keystore.jks
-            cp /tmp/keystore.jks android/app/src/main/assets/keystore.jks
-            echo "KEYSTORE_PATH=/tmp/keystore.jks" >> $GITHUB_ENV
+          SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          if [ -x "$SDKMANAGER" ]; then
+            yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+            "$SDKMANAGER" --install "platforms;android-35" "build-tools;35.0.0" > /dev/null 2>&1 || true
           fi
+          echo "ANDROID_HOME=${ANDROID_HOME}"
+          echo "platforms: $(ls "${ANDROID_HOME}/platforms" 2>/dev/null | tr '\n' ' ')"
+          echo "build-tools: $(ls "${ANDROID_HOME}/build-tools" 2>/dev/null | tr '\n' ' ')"
 
       - name: Build debug APK
-        run: |
-          cd android
-          ./gradlew clean assembleDebug --no-daemon --console=plain -Pverbose
+        working-directory: android
+        run: gradle assembleDebug --no-daemon --stacktrace --console=plain
 
       - name: Upload debug APK
-        if: success()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: cybertrace-dashboard-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          path: android/app/build/outputs/apk/debug/*.apk
           retention-days: 30
-          if-no-files-found: error
+          if-no-files-found: warn
 
-      - name: Upload build logs on failure
+      - name: Upload build reports on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
           path: |
-            android/app/build/reports/lint-results-debug.html
-            android/app/build/outputs/logs/debug.log
-          retention-days: 3
+            android/app/build/reports/**
+            android/**/build/test-results/**
+          retention-days: 7
+          if-no-files-found: ignore

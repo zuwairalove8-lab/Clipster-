@@ -10,13 +10,13 @@ permissions:
   pages: write
   id-token: write
 
-env:
-  BUILD_CMD: echo "Static site - skipping framework build"
-  INSTALL_CMD: echo "No dependencies to install"
+concurrency:
+  group: pages
+  cancel-in-progress: false
 
 jobs:
-  build-and-deploy:
-    name: Build and deploy landing page
+  deploy:
+    name: Deploy landing page
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:
@@ -24,19 +24,17 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Pages
+      - name: Configure Pages
         uses: actions/configure-pages@v5
-        with:
-          enablement: ${{ runner.os == 'Linux' }}
 
-      - name: Upload landing page artifact
+      - name: Upload landing page
         uses: actions/upload-pages-artifact@v3
         with:
           path: landing
 
-      - name: Deploy to GitHub Pages
+      - name: Deploy
         id: deployment
         uses: actions/deploy-pages@v4

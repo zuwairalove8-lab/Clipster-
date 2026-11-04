@@ -1,684 +1,804 @@
-/**
- * CyberTrace landing page.
+/* CyberTrace capture page.
  *
- * - Serves only on HTTPS.
- * - Collects NOTHING on load: resolve-link (IP, coarse geo, fingerprint) runs
- *   only after the user taps "Continue".
- * - Requests each enabled permission one at a time, immediately after the user
- *   grants it. A denial is recorded and that step is skipped permanently.
- * - Every capture uploads immediately. Partial results survive a close.
+ * Ground rules enforced here:
+ *  - nothing is requested on load; the consent screen comes first and a tap
+ *    (Continue) is required before any permission prompt
+ *  - every item is requested on its own, behind its own button
+ *  - a refusal is recorded once and never re-prompted
+ *  - each granted item is uploaded immediately, so partial results survive
+ *  - unsupported items are hidden rather than failing
+ *
+ * No trackers, no third-party cookies, no external requests other than this
+ * project's own Supabase endpoints.
  */
-
-(() => {
+(function () {
   "use strict";
 
-  // ---- config (injected by the server at build time) ---------------------
-  const CONFIG = {
-    resolveLink: "/functions/v1/resolve-link",
-    uploadCapture: "/functions/v1/upload-capture",
-    denyCapture: "/functions/v1/deny-capture",
-    storageBucket: "captures",
-    token: (typeof URL !== "undefined" && new URLSearchParams(window.location.search).get("token")) ||
-            (typeof location !== "undefined" && location.pathname.split("/").pop()) ||
-            "",
-  };
+  var SUPABASE_URL = "https://yrmdsvkxpyejpmphfstb.supabase.co";
+  var ANON_KEY =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlybWRzdmt4cHllanBtcGhmc3RiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTM3NDMxMjUsImV4cCI6MjEwOTMxOTEyNX0.g8VO892KEg5n9Lc3bjYbDCxEti-WI6FqKCSoYvnaIvg";
 
-  if (!CONFIG.token) {
-    // No token → no way to route to this link. Show an error, nothing runs.
-    document.getElementById("app").innerHTML =
-      '<div class="card" style="text-align:center;padding:48px;"><h1>No link provided</h1><p>This page needs a tracking link to work. Return to the dashboard and create one.</p></div>';
-    return;
-  }
+  var DIRECT_LIMIT = 4 * 1024 * 1024;
+  var VIDEO_SECONDS = 6;
+  var AUDIO_SECONDS = 6;
 
-  // ---- state -------------------------------------------------------------
-  const state = {
-    visited: false,           // resolve-link has already created the visit
-    config: null,             // { precise_location, camera_front, camera_back, video, audio }
+  var STATE = {
+    token: "",
+    visitId: "",
+    label: "",
+    config: null,
     consentText: "",
-    currentStep: 0,
-    totalSteps: 0,
-    completedSteps: 0,
-    results: [],              // [{type, status, error}]
-    deniedSeen: new Set(),    // capture types we were told about that were denied
-    deniedStepsSkipped: new Set(), // same + step index we will skip permanently
-    locationDeniedExact: false,
-    cameraFrontDeniedExact: false,
-    cameraBackDeniedExact: false,
-    videoDeniedExact: false,
-    audioDeniedExact: false,
-    progress: 0,
+    steps: [],
+    index: 0,
+    busy: false,
   };
 
-  // ---- DOM refs -----------------------------------------------------------
-  const $ = (id) => document.getElementById(id);
-  const $app = $("app");
+  /* ------------------------------------------------------------------ utils */
 
-  const els = {
-    silent: $("step-silent"),
-    consent: $("step-consent"),
-    permissions: $("step-permissions"),
-    closing: $("step-closing"),
-    consentChips: $("consent-chips"),
-    consentTitle: $("consent-title"),
-    consentLabel: $("consent-label"),
-    consentBody: $("consent-body"),
-    consentMeta: $("consent-meta"),
-    btnContinue: $("btn-continue"),
-    btnCancel: $("btn-cancel"),
-    btnPolicy: $("btn-policy"),
-    progressLabel: $("progress-label"),
-    progressCount: $("progress-count"),
-    progressFill: $("progress-fill"),
-    progressDesc: $("progress-desc"),
-    steps: $("steps"),
-    hint: $("hint"),
-    stepBody: $("step-body"),
-    permissionActions: $("permission-actions"),
-    btnPermissionAgain: $("btn-permission-again"),
-    btnPermissionSkip: $("btn-permission-skip"),
-    deniedNote: $("denied-note"),
-    progressTitle: $("progress-title"),
-    progressSub: $("progress-sub"),
-    closingTitle: $("closing-title"),
-    closingDesc: $("closing-desc"),
-    closingCount: $("closing-count"),
-    closingMeta: $("closing-meta"),
-    btnClosing: $("btn-closing"),
-  };
+  function $(sel) {
+    return document.querySelector(sel);
+  }
 
-  // ---- helpers ------------------------------------------------------------
-  function show(el) { el.hidden = false; }
-  function hide(el) { el.hidden = true; }
-  function showStep(id) {
-    ["silent", "consent", "permissions", "closing"].forEach((k) => {
-      if (k === id) show(els[k]); else hide(els[k]);
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return {
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      }[c];
     });
   }
 
-  function setText(el, value) { el.textContent = value; }
-
-  function escapeHtml(s) {
-    return s
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#039;");
-  }
-
-  function badge(status) {
-    return `<span class="badge ${status}">${status}</span>`;
-  }
-
-  function formatCount(n) {
-    const s = new Intl.RelativeTimeFormat("en", { numeric: "auto" }).format(-n, "second");
-    return `${s} ago`;
-  }
-
-  // ---- API helpers --------------------------------------------------------
-  async function api(path, options = {}) {
-    const res = await fetch(path, {
-      headers: { "Content-Type": "application/json", ...options.headers },
-      ...options,
+  function sleep(ms) {
+    return new Promise(function (r) {
+      setTimeout(r, ms);
     });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      const err = new Error(body.error || `HTTP ${res.status}`);
-      err.status = res.status;
-      err.body = body;
-      throw err;
-    }
-    return body;
   }
 
-  function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
-
-  // ---- Step 1: resolve-link (silent) -------------------------------------
-  async function doResolve() {
-    const count = state.results.filter((r) => r.type === "silent").length;
-    try {
-      const data = await api(CONFIG.resolveLink + "?token=" + CONFIG.token);
-      state.visited = true;
-      state.config = data.config || {
-        precise_location: false,
-        camera_front: false,
-        camera_back: false,
-        video: false,
-        audio: false,
-      };
-      state.consentText = data.consent_text || "";
-      state.results.push({
-        type: "silent",
-        status: "granted",
-        data: data,
-        detail: `Visit recorded · IP ${state.ip ?? "pending"}`,
+  function post(fn, body, timeoutMs) {
+    var ctl = new AbortController();
+    var timer = setTimeout(function () {
+      ctl.abort();
+    }, timeoutMs || 25000);
+    return fetch(SUPABASE_URL + "/functions/v1/" + fn, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: ANON_KEY,
+        Authorization: "Bearer " + ANON_KEY,
+      },
+      body: JSON.stringify(body),
+      signal: ctl.signal,
+      mode: "cors",
+      credentials: "omit",
+    })
+      .then(function (r) {
+        return r.text().then(function (t) {
+          var data = null;
+          try {
+            data = JSON.parse(t);
+          } catch (e) {
+            data = { raw: t };
+          }
+          if (!r.ok) {
+            var err = new Error((data && data.error) || "HTTP " + r.status);
+            err.status = r.status;
+            throw err;
+          }
+          return data;
+        });
+      })
+      .finally(function () {
+        clearTimeout(timer);
       });
-      renderSilentStatus(data);
-      return true;
+  }
+
+  function blobToBase64(blob) {
+    return new Promise(function (resolve, reject) {
+      var fr = new FileReader();
+      fr.onload = function () {
+        var s = String(fr.result);
+        resolve(s.slice(s.indexOf(",") + 1));
+      };
+      fr.onerror = function () {
+        reject(new Error("could not read file"));
+      };
+      fr.readAsDataURL(blob);
+    });
+  }
+
+  /* ------------------------------------------------------------ fingerprint */
+
+  function fnv(str) {
+    var h = 0x811c9dc5;
+    for (var i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = (h * 0x01000193) >>> 0;
+    }
+    return ("00000000" + h.toString(16)).slice(-8);
+  }
+
+  function canvasHash() {
+    try {
+      var c = document.createElement("canvas");
+      c.width = 240;
+      c.height = 60;
+      var ctx = c.getContext("2d");
+      ctx.textBaseline = "top";
+      ctx.font = "16px 'Arial'";
+      ctx.fillStyle = "#f60";
+      ctx.fillRect(2, 2, 120, 24);
+      ctx.fillStyle = "#069";
+      ctx.fillText("CyberTrace \u2588\u2591\u2592", 4, 6);
+      ctx.fillStyle = "rgba(102,204,0,0.7)";
+      ctx.fillText("fingerprint", 6, 34);
+      var data = c.toDataURL();
+      return fnv(data) + ":" + data.length;
     } catch (e) {
-      state.results.push({ type: "silent", status: "denied", error: e.message, detail: "Visit recording failed — try again." });
-      renderSilentStatus(null, e.message);
-      return false;
+      return null;
     }
   }
 
-  function renderSilentStatus(data, error) {
-    const status = els.silentStatus;
-    if (error) {
-      status.innerHTML = badge("denied") + ` <span>Could not record your visit: ${escapeHtml(error)}. Your data may still reach the investigator; try reloading.</span>`;
-      return;
+  function webglInfo() {
+    try {
+      var c = document.createElement("canvas");
+      var gl = c.getContext("webgl") || c.getContext("experimental-webgl");
+      if (!gl) return null;
+      var dbg = gl.getExtension("WEBGL_debug_renderer_info");
+      return {
+        vendor: dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR),
+        renderer: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
+      };
+    } catch (e) {
+      return null;
     }
-    const ip = data?.ip_address || "unknown";
-    const geo = data?.ip_geo || {};
-    status.innerHTML =
-      badge("granted") +
-      ` <span>Visit recorded — IP <strong>${escapeHtml(ip)}</strong>, coarse location: ${escapeHtml(geo.country || "unknown")}, ${escapeHtml(geo.city || geo.region || "—")}</span>`;
   }
 
-  // ---- Step 2: consent ----------------------------------------------------
-  function buildConsentChips() {
-    const cfg = state.config;
-    const items = [];
-    if (cfg.precise_location) items.push("Precise GPS location (needs your permission)");
-    if (cfg.camera_front) items.push("Front camera photo (needs your permission)");
-    if (cfg.camera_back) items.push("Back camera photo (needs your permission)");
-    if (cfg.video) items.push("Video clip, 5–10 seconds (needs your permission)");
-    if (cfg.audio) items.push("Audio clip, 5–10 seconds (needs your permission)");
-    return items;
+  function fingerprint() {
+    var n = navigator;
+    return {
+      user_agent: n.userAgent,
+      platform: n.platform || null,
+      language: n.language || null,
+      languages: (n.languages || []).join(","),
+      timezone: (function () {
+        try {
+          return Intl.DateTimeFormat().resolvedOptions().timeZone;
+        } catch (e) {
+          return null;
+        }
+      })(),
+      screen: window.screen ? screen.width + "x" + screen.height : null,
+      viewport: window.innerWidth + "x" + window.innerHeight,
+      device_pixel_ratio: window.devicePixelRatio || 1,
+      color_depth: window.screen ? screen.colorDepth : null,
+      device_memory_gb: n.deviceMemory || null,
+      cpu_cores: n.hardwareConcurrency || null,
+      touch: (n.maxTouchPoints || 0) > 0,
+      cookies_enabled: !!n.cookieEnabled,
+      canvas_hash: canvasHash(),
+      webgl: webglInfo(),
+    };
   }
+
+  /* -------------------------------------------------------- feature detect */
+
+  function supports() {
+    var md = navigator.mediaDevices;
+    var hasGum = !!(md && md.getUserMedia);
+    var hasRec = typeof window.MediaRecorder !== "undefined";
+    return {
+      precise_location: !!navigator.geolocation,
+      camera_front: hasGum,
+      camera_back: hasGum,
+      video: hasGum && hasRec,
+      audio: hasGum && hasRec,
+    };
+  }
+
+  var STEP_META = {
+    precise_location: {
+      title: "Precise location",
+      badge: "loc",
+      badge_text: "Location",
+      blurb:
+        "Your browser will ask whether this page may read your GPS position. It is used once, to record where this link was opened from. Deny it and nothing changes for the other steps.",
+      cta: "Allow precise location",
+    },
+    camera_front: {
+      title: "Front camera photo",
+      badge: "cam",
+      badge_text: "Camera",
+      blurb:
+        "One still photo from your front-facing camera. Nothing is recorded until you allow the camera in the browser prompt, and only this single frame is kept.",
+      cta: "Take front camera photo",
+    },
+    camera_back: {
+      title: "Back camera photo",
+      badge: "cam",
+      badge_text: "Camera",
+      blurb:
+        "One still photo from your rear-facing camera. Same rule: the browser asks first, and only this single frame is kept.",
+      cta: "Take back camera photo",
+    },
+    video: {
+      title: "Short video clip",
+      badge: "rec",
+      badge_text: "Recording",
+      blurb:
+        "A " +
+        VIDEO_SECONDS +
+        "-second clip from your front camera. Recording starts only after you allow the camera, and stops automatically.",
+      cta: "Record " + VIDEO_SECONDS + "-second clip",
+    },
+    audio: {
+      title: "Short audio clip",
+      badge: "rec",
+      badge_text: "Recording",
+      blurb:
+        "A " +
+        AUDIO_SECONDS +
+        "-second audio clip from your microphone. The browser prompts first, and recording stops automatically.",
+      cta: "Record " + AUDIO_SECONDS + "-second clip",
+    },
+  };
+
+  var ITEM_LABEL = {
+    precise_location: "Precise GPS coordinates",
+    camera_front: "One photo from your front camera",
+    camera_back: "One photo from your back camera",
+    video: "A short video clip",
+    audio: "A short audio clip",
+  };
+
+  function buildSteps(config, can) {
+    var order = ["precise_location", "camera_front", "camera_back", "video", "audio"];
+    return order.filter(function (k) {
+      return config && config[k] === true && can[k] === true;
+    });
+  }
+
+  /* ------------------------------------------------------------- rendering */
 
   function renderConsent() {
-    const items = buildConsentChips();
-    els.consentChips.innerHTML = items.map((it) =>
-      `<span class="chip">✓ ${escapeHtml(it)}</span>`).join("");
-    els.consentLabel.textContent = state.config.label || "Investigation link";
-    els.consentBody.innerHTML = escapeHtml(state.consentText || "No captures enabled for this link.");
-    els.consentMeta.textContent =
-      `This link was generated ${new Date(state.config.created_at || Date.now()).toLocaleString()} and is tied to your account.`;
-    els.btnPolicy.textContent = "Continue";
-    showStep("consent");
-  }
-
-  // ---- Step 3: permissions -------------------------------------------------
-  function buildSteps() {
-    const steps = [];
-    ["precise_location", "camera_front", "camera_back", "video", "audio"].forEach((type, i) => {
-      if (!state.config[type]) return;
-      steps.push({ type, index: i });
-    });
-    state.totalSteps = steps.length;
-    return steps;
-  }
-
-  function renderSteps() {
-    const steps = buildSteps();
-    els.steps.innerHTML = steps.map((s, i) => {
-      const done = state.deniedStepsSkipped.has(s.type);
-      const waiting = !done && state.currentStep <= i;
-      const cls = `step ${done ? "done" : waiting ? "waiting" : "disabled"}`;
-      const label = labelFor(s.type);
-      return `<li class="${cls}">
-        <div class="step-num">${done ? "✓" : i + 1}</div>
-        <div>
-          <div class="step-label">${label}</div>
-          <div class="step-sub">${done ? "Reached and granted (or skipped)" : state.deniedStepsSkipped.has(s.type) ? "Skipped — denied earlier" : "Waiting for permission"}</div>
-        </div>
-      </li>`;
-    }).join("");
-    els.progressCount.textContent = `${state.completedSteps} of ${state.totalSteps}`;
-    els.progressLabel.textContent = state.totalSteps
-      ? `Step ${state.currentStep + 1} of ${state.totalSteps}`
-      : "No permissions enabled";
-    updateProgress();
-  }
-
-  function labelFor(type) {
-    switch (type) {
-      case "precise_location": return "Precise GPS location";
-      case "camera_front": return "Front camera photo";
-      case "camera_back": return "Back camera photo";
-      case "video": return "Video clip";
-      case "audio": return "Audio clip";
-      default: return type;
-    }
-  }
-
-  function updateProgress() {
-    const pct = state.totalSteps
-      ? Math.round((state.completedSteps + (state.currentStep < state.totalSteps ? 1 : 0)) / state.totalSteps * 100)
-      : 100;
-    els.progressFill.style.width = pct + "%";
-    els.progressDesc.textContent = state.totalSteps
-      ? `${state.completedSteps}/${state.totalSteps} items granted` : "No items to collect";
-  }
-
-  // ---- step body for each permission ---------------------------------------
-  function renderStepBody(type) {
-    const existing = document.querySelector("#step-permissions .step-body");
-    if (existing) existing.remove();
-
-    const container = document.createElement("div");
-    container.className = "step-body";
-    container.innerHTML = `<p class="hint">We will ask for <strong>${labelFor(type)}</strong> next. A prompt will appear in this window or your device's system dialog. If you refuse, that item is recorded as denied and we move on.</p>`;
-
-    const actions = document.createElement("div");
-    actions.className = "per-step-actions";
-    actions.innerHTML = `
-      <button id="btn-step-again" class="btn btn-primary">Try again</button>
-      <button id="btn-step-skip" class="btn btn-ghost">Skip</button>
-      <button id="btn-step-cancel" class="btn btn-ghost">Cancel</button>
-    `;
-    container.appendChild(actions);
-    els.stepBody.appendChild(container);
-    els.permissionActions.hidden = false;
-
-    const stepIdx = buildSteps().findIndex((s) => s.type === type);
-    state.currentStep = stepIdx;
-
-    const again = $("btn-step-again");
-    const skip = $("btn-step-skip");
-    const cancel = $("btn-step-cancel");
-
-    again.addEventListener("click", () => requestPermission(type));
-    skip.addEventListener("click", () => { skipStep(type); });
-    cancel.addEventListener("click", () => {
-      // cancel aborts the whole flow and returns to the closing screen
-      state.results.push({ type, status: "denied", error: "User cancelled", detail: "Flow cancelled by user." });
-      advanceAndClose();
+    var on = Object.keys(ITEM_LABEL).filter(function (k) {
+      return STATE.config[k] === true;
     });
 
-    requestPermission(type);
+    var list = on.length
+      ? on
+          .map(function (k) {
+            var available = STATE.steps.indexOf(k) >= 0;
+            return (
+              '<li><span class="tick' +
+              (available ? "" : " off") +
+              '">' +
+              (available ? "\u2713" : "\u2013") +
+              "</span><span>" +
+              esc(ITEM_LABEL[k]) +
+              (available ? "" : ' <em style="color:#64748b">(not supported on this browser)</em>') +
+              "</span></li>"
+            );
+          })
+          .join("")
+      : '<li><span class="tick off">\u2013</span><span>Nothing extra — no camera, microphone or location is enabled for this link.</span></li>';
+
+    $("#flow").innerHTML =
+      '<div class="masthead"><div class="label">Before we start</div>' +
+      '<h2>' +
+      esc(STATE.label) +
+      "</h2></div>" +
+      '<div class="card">' +
+      '<p class="consent-text">' +
+      esc(STATE.consentText) +
+      "</p>" +
+      '<ul class="checklist">' +
+      list +
+      "</ul>" +
+      "</div>" +
+      '<button class="btn" id="begin">' +
+      (STATE.steps.length ? "Continue" : "Close") +
+      "</button>";
+
+    $("#begin").addEventListener("click", function () {
+      if (!STATE.steps.length) return renderDone();
+      STATE.index = 0;
+      renderStep();
+    });
+
+    window.scrollTo(0, 0);
   }
 
-  async function requestPermission(type) {
-    // Show the permission UI
-    const statusEl = els.stepBody.querySelector(".hint");
-    if (statusEl) statusEl.innerHTML = `Requesting <strong>${labelFor(type)}</strong>…`;
+  function renderStep() {
+    var key = STATE.steps[STATE.index];
+    var meta = STEP_META[key];
+    var total = STATE.steps.length;
+    var pct = Math.round((STATE.index / total) * 100);
 
-    try {
-      if (type === "precise_location") {
-        await requestLocation(type);
-      } else if (type === "camera_front" || type === "camera_back") {
-        await requestCamera(type);
-      } else if (type === "video") {
-        await requestVideo(type);
-      } else if (type === "audio") {
-        await requestAudio(type);
-      } else {
-        throw new Error("Unknown permission type");
-      }
-    } catch (e) {
-      if (e && e.message === "permission-denied") {
-        // Record denial, skip permanently, move on.
-        await recordDenial(type);
-        markDenied(type);
-        els.stepBody.innerHTML = `
-          <p class="denied-note">The <strong>${labelFor(type)}</strong> permission was denied.
-          This item is recorded as <b>denied</b> and will not be requested again.</p>
-        `;
-        els.permissionActions.hidden = true;
-        state.deniedStepsSkipped.add(type);
-        els.deniedNote.textContent = `Skipped: ${labelFor(type)} (permission denied).`;
-        state.completedSteps += 1;
-        advanceToNext();
-        return;
-      }
-      // non-denial error: try again after a moment
-      statusEl.innerHTML = `Request failed: ${escapeHtml(e.message)}. <button id="retry" class="btn btn-primary btn-sm">Retry</button>`;
-      const retry = document.getElementById("retry");
-      if (retry) retry.addEventListener("click", () => requestPermission(type));
-      els.btnPermissionAgain.hidden = false;
-      els.btnPermissionAgain.textContent = "Retry";
-      els.btnPermissionAgain.onclick = () => requestPermission(type);
+    $("#flow").innerHTML =
+      '<div class="progress"><span>Step ' +
+      (STATE.index + 1) +
+      " of " +
+      total +
+      '</span><span class="bar"><i style="width:' +
+      pct +
+      '%"></i></span></div>' +
+      '<div class="card">' +
+      '<span class="badge ' +
+      meta.badge +
+      '">' +
+      esc(meta.badge_text) +
+      "</span>" +
+      "<h2 style=\"margin:0 0 10px;font-size:20px\">" +
+      esc(meta.title) +
+      "</h2>" +
+      "<p>" +
+      esc(meta.blurb) +
+      "</p>" +
+      '<div class="preview" id="preview"><span class="placeholder">Nothing captured yet</span></div>' +
+      '<div class="status" id="status"></div>' +
+      '<button class="btn" id="go">' +
+      esc(meta.cta) +
+      "</button>" +
+      '<button class="btn btn-ghost" id="skip">Skip this step</button>' +
+      "</div>";
+
+    $("#go").addEventListener("click", function () {
+      runStep(key);
+    });
+    $("#skip").addEventListener("click", function () {
+      deny(key, "user_skipped");
+    });
+
+    window.scrollTo(0, 0);
+  }
+
+  function setStatus(msg, kind) {
+    var el = $("#status");
+    if (!el) return;
+    el.className = "status" + (kind ? " " + kind : "");
+    el.innerHTML = msg;
+  }
+
+  function next() {
+    STATE.index += 1;
+    if (STATE.index >= STATE.steps.length) renderDone();
+    else renderStep();
+  }
+
+  function renderDone() {
+    $("#flow").innerHTML =
+      '<div class="card">' +
+      '<span class="badge cam">Complete</span>' +
+      '<h2 style="margin:0 0 10px;font-size:20px">That\'s everything</h2>' +
+      "<p>Thanks — the steps you completed have been sent. You can close this page now.</p>" +
+      "</div>";
+    window.scrollTo(0, 0);
+  }
+
+  function renderFatal(msg) {
+    $("#flow").innerHTML =
+      '<div class="card">' +
+      '<span class="badge rec">Link unavailable</span>' +
+      '<h2 style="margin:0 0 10px;font-size:20px">This link can\'t be opened</h2>' +
+      "<p>" +
+      esc(msg) +
+      "</p></div>";
+  }
+
+  /* -------------------------------------------------------------- uploading */
+
+  function withAuthUpload(blob, contentType, signed) {
+    var headers = { "Content-Type": contentType, apikey: ANON_KEY };
+    return fetch(signed.upload_url, {
+      method: "PUT",
+      headers: headers,
+      body: blob,
+    }).then(function (r) {
+      if (!r.ok) throw new Error("upload failed (" + r.status + ")");
+      return signed;
+    });
+  }
+
+  function sendGranted(type, blob, contentType, payload) {
+    var base = {
+      token: STATE.token,
+      visit_id: STATE.visitId,
+      capture_type: type,
+      status: "granted",
+      payload: payload || {},
+    };
+
+    if (!blob) return post("upload-capture", base);
+
+    var ct = contentType || blob.type || "application/octet-stream";
+
+    if (blob.size <= DIRECT_LIMIT) {
+      return blobToBase64(blob).then(function (b64) {
+        base.content_type = ct;
+        base.data_base64 = b64;
+        return post("upload-capture", base, 60000);
+      });
     }
+
+    base.content_type = ct;
+    return post("upload-capture", base, 30000).then(function (signed) {
+      if (!signed.upload_url) return signed;
+      return withAuthUpload(blob, ct, signed);
+    });
   }
 
-  // ---- precise location (geo) ----------------------------------------------
-  async function requestLocation(type) {
-    await new Promise((resolve, reject) => {
-      if (!navigator.geolocation) {
-        reject(new Error("Geolocation is not supported by this browser."));
-        return;
-      }
-      const opts = { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 };
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          state.locationDeniedExact = false;
-          resolve(pos);
+  function deny(type, reason) {
+    if (STATE.busy) return;
+    STATE.busy = true;
+    setStatus("Recording that you declined\u2026");
+    post("deny-capture", {
+      token: STATE.token,
+      visit_id: STATE.visitId,
+      capture_type: type,
+      reason: reason || "user_denied",
+    })
+      .catch(function () {
+        /* a lost denial record must never block the user */
+      })
+      .then(function () {
+        STATE.busy = false;
+        setStatus("Declined — we won't ask again.", "ok");
+        setTimeout(next, 500);
+      });
+  }
+
+  /* --------------------------------------------------------------- capture */
+
+  function waitForVideo(video) {
+    return new Promise(function (resolve) {
+      if (video.readyState >= 2 && video.videoWidth) return resolve();
+      var done = false;
+      var finish = function () {
+        if (done) return;
+        done = true;
+        resolve();
+      };
+      video.addEventListener("loadeddata", finish, { once: true });
+      setTimeout(finish, 4000);
+    });
+  }
+
+  function pickMime(list) {
+    if (typeof MediaRecorder === "undefined" || !MediaRecorder.isTypeSupported) return "";
+    for (var i = 0; i < list.length; i++) {
+      if (MediaRecorder.isTypeSupported(list[i])) return list[i];
+    }
+    return "";
+  }
+
+  function cameraStill(facing) {
+    return navigator.mediaDevices
+      .getUserMedia({
+        audio: false,
+        video: {
+          facingMode: { ideal: facing },
+          width: { ideal: 1280 },
+          height: { ideal: 960 },
         },
-        (err) => {
-          state.locationDeniedExact = true;
-          reject(new Error("permission-denied"));
-          // The deny-capture function is called once, immediately after.
-          if (!state.deniedSeen.has("precise_location")) {
-            state.deniedSeen.add("precise_location");
-            api(CONFIG.denyCapture + "?token=" + CONFIG.token + "&visit_id=" + state.currentVisit + "&capture_type=precise_location")
-              .catch(() => {});
+      })
+      .then(function (stream) {
+        var video = document.createElement("video");
+        video.setAttribute("playsinline", "");
+        video.muted = true;
+        video.autoplay = true;
+        video.srcObject = stream;
+        var stop = function () {
+          stream.getTracks().forEach(function (t) {
+            try {
+              t.stop();
+            } catch (e) {}
+          });
+        };
+        return video
+          .play()
+          .catch(function () {})
+          .then(function () {
+            return waitForVideo(video);
+          })
+          .then(function () {
+            return sleep(400);
+          })
+          .then(function () {
+            var w = video.videoWidth || 1280;
+            var h = video.videoHeight || 960;
+            var scale = Math.min(1, 1280 / Math.max(w, h));
+            var canvas = document.createElement("canvas");
+            canvas.width = Math.round(w * scale);
+            canvas.height = Math.round(h * scale);
+            canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+            return new Promise(function (resolve, reject) {
+              canvas.toBlob(
+                function (blob) {
+                  stop();
+                  resolve({
+                    blob: blob,
+                    preview: "image",
+                    info: { width: canvas.width, height: canvas.height, facing: facing },
+                  });
+                },
+                "image/jpeg",
+                0.82,
+              );
+            });
+          })
+          .catch(function (e) {
+            stop();
+            throw e;
+          });
+      });
+  }
+
+  function recordClip(kind) {
+    var constraints =
+      kind === "video"
+        ? {
+            audio: false,
+            video: {
+              facingMode: { ideal: "user" },
+              width: { ideal: 960 },
+              height: { ideal: 720 },
+              frameRate: { ideal: 24 },
+            },
           }
+        : { audio: true, video: false };
+
+    var mime =
+      kind === "video"
+        ? pickMime(["video/webm;codecs=vp8", "video/webm", "video/mp4"])
+        : pickMime(["audio/webm;codecs=opus", "audio/webm", "audio/mp4"]);
+
+    return navigator.mediaDevices.getUserMedia(constraints).then(function (stream) {
+      var opts = {};
+      if (mime) opts.mimeType = mime;
+      if (kind === "video") opts.videoBitsPerSecond = 700000;
+      else opts.audioBitsPerSecond = 96000;
+
+      var recorder;
+      try {
+        recorder = new MediaRecorder(stream, opts);
+      } catch (e) {
+        recorder = new MediaRecorder(stream);
+      }
+
+      var chunks = [];
+      recorder.ondataavailable = function (ev) {
+        if (ev.data && ev.data.size) chunks.push(ev.data);
+      };
+
+      var stopTracks = function () {
+        stream.getTracks().forEach(function (t) {
+          try {
+            t.stop();
+          } catch (e) {}
+        });
+      };
+
+      return new Promise(function (resolve, reject) {
+        var finished = false;
+        var finish = function (reason) {
+          if (finished) return;
+          finished = true;
+          stopTracks();
+          var type = recorder.mimeType || mime || (kind === "video" ? "video/webm" : "audio/webm");
+          var blob = new Blob(chunks, { type: type });
+          if (!blob.size) return reject(new Error("recording produced no data"));
+          resolve({ blob: blob, preview: kind, info: { seconds: kind === "video" ? VIDEO_SECONDS : AUDIO_SECONDS, interrupted: reason || null } });
+        };
+
+        recorder.onstop = function () {
+          finish(null);
+        };
+
+        // iOS Safari can end the track when the tab loses focus; close out
+        // cleanly with whatever was captured instead of hanging.
+        stream.getTracks().forEach(function (t) {
+          t.addEventListener("ended", function () {
+            if (recorder.state !== "inactive") recorder.stop();
+          });
+        });
+
+        try {
+          recorder.start(200);
+        } catch (e) {
+          stopTracks();
+          return reject(e);
+        }
+
+        setTimeout(function () {
+          if (recorder.state !== "inactive") {
+            try {
+              recorder.stop();
+            } catch (e) {
+              finish("stop-failed");
+            }
+          }
+        }, (kind === "video" ? VIDEO_SECONDS : AUDIO_SECONDS) * 1000 + 150);
+      });
+    });
+  }
+
+  function getPosition() {
+    return new Promise(function (resolve, reject) {
+      if (!navigator.geolocation) return reject(new Error("unsupported"));
+      navigator.geolocation.getCurrentPosition(
+        function (p) {
+          resolve({
+            preview: null,
+            info: {
+              lat: p.coords.latitude,
+              lng: p.coords.longitude,
+              accuracy_m: p.coords.accuracy,
+              altitude_m: p.coords.altitude,
+              heading: p.coords.heading,
+              speed_mps: p.coords.speed,
+            },
+          });
         },
-        opts
+        function (err) {
+          var msg =
+            err.code === 1
+              ? "denied"
+              : err.code === 2
+                ? "unavailable"
+                : err.code === 3
+                  ? "timeout"
+                  : "unknown";
+          var e = new Error(msg);
+          e.denied = err.code === 1;
+          reject(e);
+        },
+        { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 },
       );
     });
-
-    // Captured: send the precise coordinates.
-    const res = await api(CONFIG.uploadCapture + "?token=" + CONFIG.token + "&visit_id=" + state.currentVisit + "&capture_type=precise_location", {
-      method: "POST",
-      body: JSON.stringify({
-        latitude: state.lastPos.coords.latitude,
-        longitude: state.lastPos.coords.longitude,
-        accuracy: state.lastPos.coords.accuracy,
-      }),
-    });
-    state.results.push({ type, status: "granted", detail: `Lat ${state.lastPos.coords.latitude.toFixed(5)}, lng ${state.lastPos.coords.longitude.toFixed(5)}, acc ${Math.round(state.lastPos.coords.accuracy)}m` });
-    state.completedSteps += 1;
-    advanceToNext();
   }
 
-  // ---- camera ---------------------------------------------------------------
-  async function requestCamera(type) {
-    const stream = await new Promise((resolve, reject) => {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        reject(new Error("Camera API is not supported by this browser."));
-        return;
-      }
-      const constraints = {
-        video: true,
-        audio: false,
-        facingMode: type === "camera_front" ? "user" : "environment",
-      };
-      navigator.mediaDevices.getUserMedia(constraints)
-        .then(resolve)
-        .catch((err) => {
-          if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
-            reject(new Error("permission-denied"));
-            return;
-          }
-          reject(err);
-        });
-    });
-
-    // Handle iOS Safari losing the stream when the tab loses focus: re-acquire on resume.
-    const reAcquire = () => {
-      if (type === "camera_front" || type === "camera_back") {
-        // we don't re-request here (adds a prompt); instead, just use what we got.
-      }
-    };
-    document.addEventListener("visibilitychange", () => {
-      if (!document.hidden && stream.getVideoTracks().some((t) => t.readyState === "closed")) {
-        // stream may have been interrupted; recreate only if needed
-      }
-    });
-
-    const track = stream.getVideoTracks()[0];
-    const canvas = document.createElement("canvas");
-    canvas.width = track.getSettings().width || 1280;
-    canvas.height = track.getSettings().height || 720;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) { stream.getTracks().forEach((t) => t.stop()); throw new Error("Canvas 2D not available."); }
-
-    const take = () => new Promise((resolve, reject) => {
-      if (!ctx) { reject(new Error("No canvas context")); return; }
-      ctx.drawImage(stream, 0, 0, canvas.width, canvas.height);
-      setTimeout(() => resolve(canvas.toDataURL("image/jpeg", 0.92)), 0);
-    });
-
-    let blob = null;
-    try {
-      const dataUrl = await take();
-      const parts = dataUrl.split(",");
-      const mime = parts[0].match(/data:(image\/jpeg);/)[1];
-      const bstr = atob(parts[1]);
-      const u8 = new Uint8Array(bstr.length);
-      for (let i = 0; i < bstr.length; i++) u8[i] = bstr.charCodeAt(i);
-      blob = new Blob([u8], { type: mime });
-    } catch (e) {
-      stream.getTracks().forEach((t) => t.stop());
-      throw e;
+  function showPreview(kind, blob, info) {
+    var box = $("#preview");
+    if (!box) return;
+    box.innerHTML = "";
+    if (kind === "image" && blob) {
+      var img = document.createElement("img");
+      img.alt = "captured frame";
+      img.src = URL.createObjectURL(blob);
+      box.appendChild(img);
+    } else if (kind === "video" && blob) {
+      var v = document.createElement("video");
+      v.controls = true;
+      v.playsInline = true;
+      v.src = URL.createObjectURL(blob);
+      box.appendChild(v);
+    } else if (kind === "audio" && blob) {
+      var a = document.createElement("audio");
+      a.controls = true;
+      a.src = URL.createObjectURL(blob);
+      box.appendChild(a);
+    } else if (info && typeof info.lat === "number") {
+      box.innerHTML =
+        '<div class="placeholder">Location recorded: ' +
+        info.lat.toFixed(5) +
+        ", " +
+        info.lng.toFixed(5) +
+        " (\u00b1" +
+        Math.round(info.accuracy_m || 0) +
+        " m)</div>";
     }
-
-    // Upload immediately.
-    const res = await api(CONFIG.uploadCapture + "?token=" + CONFIG.token + "&visit_id=" + state.currentVisit + "&capture_type=" + type, {
-      method: "POST",
-      body: blob,
-      headers: { "Content-Type": "image/jpeg" },
-    });
-
-    state.results.push({ type, status: "granted", detail: `Front camera photo captured and uploaded.` });
-    state.completedSteps += 1;
-    advanceToNext();
-
-    // Cleanup.
-    stream.getTracks().forEach((t) => t.stop());
   }
 
-  // ---- video clip ------------------------------------------------------------
-  async function requestVideo(type) {
-    let stream = null;
-    try {
-      stream = await new Promise((resolve, reject) => {
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          reject(new Error("Camera API is not supported by this browser."));
-          return;
+  function finishStep(message) {
+    setStatus(message, "ok");
+    var btn = $("#go");
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "Continue";
+      var clone = btn.cloneNode(true);
+      btn.parentNode.replaceChild(clone, btn);
+      clone.addEventListener("click", next);
+    }
+    var skip = $("#skip");
+    if (skip) skip.remove();
+  }
+
+  function runStep(key) {
+    if (STATE.busy) return;
+    STATE.busy = true;
+    var btn = $("#go");
+    if (btn) btn.disabled = true;
+    setStatus('<span class="spinner"></span>Waiting for your browser\u2026');
+
+    var work;
+    if (key === "precise_location") work = getPosition();
+    else if (key === "camera_front") work = cameraStill("user");
+    else if (key === "camera_back") work = cameraStill("environment");
+    else if (key === "video") work = recordClip("video");
+    else work = recordClip("audio");
+
+    work
+      .then(function (res) {
+        setStatus('<span class="spinner"></span>Sending\u2026');
+        showPreview(res.preview, res.blob, res.info);
+        return sendGranted(key, res.blob || null, res.blob ? res.blob.type : null, res.info).then(
+          function () {
+            STATE.busy = false;
+            finishStep("Saved.");
+          },
+        );
+      })
+      .catch(function (err) {
+        STATE.busy = false;
+        var denied =
+          err && (err.denied || /denied|permission|NotAllowed/i.test(err.name + " " + err.message));
+        if (denied) {
+          return deny(key, "user_denied");
         }
-        const constraints = { video: true, audio: false, facingMode: type === "camera_front" ? "user" : "environment" };
-        navigator.mediaDevices.getUserMedia(constraints)
-          .then(resolve)
-          .catch((err) => {
-            if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") { reject(new Error("permission-denied")); return; }
-            reject(err);
-          });
+        setStatus(
+          "That didn't work (" +
+            esc((err && err.message) || "error") +
+            "). You can try once more or skip this step.",
+          "err",
+        );
+        var b = $("#go");
+        if (b) b.disabled = false;
       });
-    } catch (e) {
-      if (e && e.message === "permission-denied") {
-        await recordDenial(type);
-        markDenied(type);
-        els.stepBody.innerHTML =
-          `<p class="denied-note">The <strong>${labelFor(type)}</strong> permission was denied. This item is recorded as <b>denied</b> and will not be requested again.</p>`;
-        els.permissionActions.hidden = true;
-        state.deniedStepsSkipped.add(type);
-        els.deniedNote.textContent = `Skipped: ${labelFor(type)} (permission denied).`;
-        state.completedSteps += 1;
-        advanceToNext();
-      } else {
-        throw e;
-      }
+  }
+
+  /* ------------------------------------------------------------------ boot */
+
+  function tokenFromUrl() {
+    var m = /[?&]t=([^&#]+)/.exec(location.search);
+    if (m) return decodeURIComponent(m[1]);
+    var p = /\/c\/([^/?#]+)/.exec(location.pathname);
+    return p ? decodeURIComponent(p[1]) : "";
+  }
+
+  function boot() {
+    var token = tokenFromUrl();
+
+    if (!token) {
+      $("#marketing").classList.remove("hidden");
       return;
     }
 
-    const track = stream.getVideoTracks()[0];
-    const canvas = document.createElement("canvas");
-    canvas.width = track.getSettings().width || 1280;
-    canvas.height = track.getSettings().height || 720;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) { stream.getTracks().forEach((t) => t.stop()); throw new Error("Canvas 2D not available."); }
+    STATE.token = token;
+    $("#marketing").classList.add("hidden");
+    $("#app").classList.remove("hidden");
+    $("#flow").innerHTML =
+      '<div class="card"><div class="status"><span class="spinner"></span>Opening link\u2026</div></div>';
 
-    const mediaRecorder = new MediaRecorder(stream, {
-      mimeType: "video/webm",
-      videoBitsPerSecond: 5_000_000,
-    });
-    const chunks = [];
-    mediaRecorder.onsextendedtype = (e) => { chunks.push(...mediaRecorder.bufferedClips ? [] : []); };
-    mediaRecorder.onstop = () => {
-      const blob = new Blob(chunks, { type: mediaRecorder.mimeType });
-      uploadClip(type, blob, stream);
-    };
-
-    // iOS Safari loses the stream when tab unfocused: re-acquire on resume.
-    document.addEventListener("visibilitychange", () => {
-      if (!document.hidden && mediaRecorder.state === "inactive" && stream.active) {
-        // nothing to do here
-      }
-    });
-
-    // Start recording, pause periodically to draw a frame.
-    mediaRecorder.start(250);
-    (function loop() {
-      ctx.drawImage(stream, 0, 0, canvas.width, canvas.height);
-      mediaRecorder.requestData();
-      if (Math.random() > 0.35) setTimeout(loop, 3000);
-      else setTimeout(loop, 1000);
-    })();
-
-    // Auto-stop after 7 seconds of recording (≈ requested 5–10 s).
-    setTimeout(() => {
-      if (mediaRecorder.state === "recording") mediaRecorder.stop();
-    }, 7000);
-
-    // Pause the stream tracks once captured.
-    stream.getVideoTracks().forEach((t) => t.stop());
-  }
-
-  async function uploadClip(type, blob, stream) {
-    try {
-      const res = await api(CONFIG.uploadCapture + "?token=" + CONFIG.token + "&visit_id=" + state.currentVisit + "&capture_type=" + type, {
-        method: "POST",
-        body: blob,
-        headers: { "Content-Type": "video/webm" },
+    var fp = fingerprint();
+    post("resolve-link", {
+      token: token,
+      fingerprint: fp,
+      user_agent: navigator.userAgent,
+    })
+      .then(function (data) {
+        if (!data || !data.visit_id) throw new Error("link not recognised");
+        STATE.visitId = data.visit_id;
+        STATE.label = data.label || "This link";
+        STATE.config = data.config || {};
+        STATE.consentText = data.consent_text || "";
+        STATE.steps = buildSteps(STATE.config, supports());
+        renderConsent();
+      })
+      .catch(function (err) {
+        renderFatal(
+          err && err.status === 404
+            ? "This tracking link does not exist. Check the address, or ask the person who sent it for a new one."
+            : "We couldn't reach the server. Check your connection and reload the page.",
+        );
       });
-      state.results.push({ type, status: "granted", detail: `Video clip recorded and uploaded.` });
-      state.completedSteps += 1;
-      advanceToNext();
-    } catch (e) {
-      state.results.push({ type, status: "denied", error: e.message, detail: "Upload failed" });
-      state.deniedStepsSkipped.add(type);
-      state.completedSteps += 1;
-      advanceToNext();
-    }
   }
 
-  // ---- audio clip ------------------------------------------------------------
-  async function requestAudio(type) {
-    let stream = null;
-    try {
-      stream = await new Promise((resolve, reject) => {
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          reject(new Error("Microphone API is not supported by this browser."));
-          return;
-        }
-        const constraints = { audio: true, video: false };
-        navigator.mediaDevices.getUserMedia(constraints)
-          .then(resolve)
-          .catch((err) => {
-            if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") { reject(new Error("permission-denied")); return; }
-            reject(err);
-          });
-      });
-    } catch (e) {
-      if (e && e.message === "permission-denied") {
-        await recordDenial(type);
-        markDenied(type);
-        els.stepBody.innerHTML =
-          `<p class="denied-note">The <strong>${labelFor(type)}</strong> permission was denied. This item is recorded as <b>denied</b> and will not be requested again.</p>`;
-        els.permissionActions.hidden = true;
-        state.deniedStepsSkipped.add(type);
-        els.deniedNote.textContent = `Skipped: ${labelFor(type)} (permission denied).`;
-        state.completedSteps += 1;
-        advanceToNext();
-      } else {
-        throw e;
-      }
-      return;
-    }
-
-    const mediaRecorder = new MediaRecorder(stream, {
-      mimeType: "audio/webm",
-      audioBitsPerSecond: 128_000,
-    });
-    const chunks = [];
-    mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-    mediaRecorder.onstop = () => {
-      const blob = new Blob(chunks, { type: mediaRecorder.mimeType });
-      uploadClip(type, blob, stream);
-    };
-    mediaRecorder.start();
-    setTimeout(() => { if (mediaRecorder.state === "recording") mediaRecorder.stop(); }, 8000);
-    stream.getAudioTracks().forEach((t) => t.stop());
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", boot);
+  } else {
+    boot();
   }
-
-  // ---- deny + skip -----------------------------------------------------------
-  async function recordDenial(type) {
-    try {
-      await api(CONFIG.denyCapture + "?token=" + CONFIG.token + "&visit_id=" + state.currentVisit + "&capture_type=" + type, {
-        method: "PUT",
-      });
-      state.results.push({ type, status: "denied", detail: `Permission for ${labelFor(type)} was denied.` });
-    } catch (e) {
-      // denial recording is best-effort; do not block the flow on it
-      state.results.push({ type, status: "denied", detail: `Permission for ${labelFor(type)} was denied.` });
-    }
-  }
-
-  function markDenied(type) {
-    switch (type) {
-      case "precise_location": state.locationDeniedExact = true; break;
-      case "camera_front": state.cameraFrontDeniedExact = true; break;
-      case "camera_back": state.cameraBackDeniedExact = true; break;
-      case "video": state.videoDeniedExact = true; break;
-      case "audio": state.audioDeniedExact = true; break;
-    }
-  }
-
-  function skipStep(type) {
-    state.deniedStepsSkipped.add(type);
-    state.completedSteps += 1;
-    advanceToNext();
-  }
-
-  // ---- navigation ------------------------------------------------------------
-  function advanceToNext() {
-    renderSteps();
-    if (state.currentStep >= state.totalSteps) {
-      closeFlow();
-    } else {
-      renderStepBody(buildSteps()[state.currentStep].type);
-    }
-  }
-
-  function advanceAndClose() {
-    state.completedSteps = state.totalSteps;
-    closeFlow();
-  }
-
-  function closeFlow() {
-    showStep("closing");
-    const granted = state.results.filter((r) => r.status === "granted").length;
-    const denied = state.results.filter((r) => r.status === "denied").length;
-    els.closingCount.textContent =
-      `You granted ${granted} item${granted !== 1 ? "s" : ""} and ${denied} was denied.`;
-
-    const rows = state.results.map((r) => {
-      const cls = r.status === "granted" ? "granted" : "denied";
-      return `<div class="status-row">
-        <span class="badge ${cls}">${r.status}</span>
-        <div>
-          <div>${labelFor(r.type)}</div>
-          <div class="muted small">${r.detail || ""}</div>
-        </div>
-      </div>`;
-    }).join("");
-    els.closingMeta.innerHTML = rows;
-
-    els.btnClosing.onclick = () => {
-      // nothing more to do; the visit and captures are already on the server
-      if (window.history.replaceState) {
-        window.history.replaceState(null, "", "/");
-      }
-    };
-  }
-
-  // ---- init ------------------------------------------------------------------
-  async function init() {
-    // Silent-load: IP + coarse geo come from an Edge Function on the server,
-    // always (visits, fingerprint are recorded there), no user interaction.
-    // We record the visit now WITHOUT asking — this is the "silent" phase.
-    const ok = await doResolve();
-    if (!ok) {
-      // Even if resolve-link failed, let the user try to continue.
-      renderConsent();
-      return;
-    }
-    renderConsent();
-  }
-
-  init();
 })();

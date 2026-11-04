@@ -1,7 +1,0 @@
-deployment:
-  name: upload-capture
-  entrypoint: functions/upload-capture/index.ts
-  config:
-    description: "CyberTrace upload-capture — records a capture row and issues a short-lived signed storage URL"
-    verify_jwt: false
-    runtime: edge

@@ -1,8 +1,0 @@
-# Supabase workspace credentials for the CyberTrace project.
-# The actual values are managed by Freebuff in the project settings;
-# copy this file as a template if you ever stand up the project locally.
-
-project_id = "yrmdsvkxpyejpmphfstb"
-anon_key    = "INSERT_ANON_KEY_HERE"
-service_key = "INSERT_SERVICE_KEY_HERE"
-auth_token  = "INSERT_AUTH_BEARER_HERE"

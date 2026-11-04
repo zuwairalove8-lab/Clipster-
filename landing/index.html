@@ -1,90 +1,93 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="referrer" content="no-referrer" />
-  <meta name="color-scheme" content="only light" />
-  <title>CyberTrace · Link Investigator</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%230d9488'/><path d='M4 4h3v3H4zM9 4h3v3h-3zM4 9h3v3H4zM9 9h3v3h-3z' fill='%23fff'/></svg>" />
-  <link rel="stylesheet" href="css/app.css" />
-</head>
-<body>
-  <!-- Never shade the page: nothing loads until the user chooses to act. -->
-  <main id="app" class="app" aria-live="polite">
-    <!-- ---------- SILENT LOAD ---------- -->
-    <section id="step-silent" class="card" hidden>
-      <div class="card-body">
-        <div class="step-icon" aria-hidden="true">
-          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#0d9488" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="robots" content="noindex" />
+    <meta name="color-scheme" content="dark" />
+    <title>CyberTrace — consent-gated investigation links</title>
+    <meta
+      name="description"
+      content="CyberTrace turns a link into a documented, consent-gated evidence request for authorized security investigations."
+    />
+    <link rel="stylesheet" href="css/app.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%232dd4bf'/%3E%3Ctext x='16' y='22' font-family='Arial' font-size='16' font-weight='bold' text-anchor='middle' fill='%2304121b'%3EC%3C/text%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <div class="wrap">
+      <!-- ------------------------------------------------ marketing page -->
+      <div id="marketing" class="hidden">
+        <div class="brand">
+          <div class="brand-mark">C</div>
+          <div class="brand-name">CyberTrace</div>
         </div>
-        <h1>Checking this link</h1>
-        <p>
-          Your browser is collecting only what this link is configured to
-          collect without asking you: your public IP, the city/region/country
-          that IP resolves to, and your device + browser fingerprint.
-          Nothing else is being captured right now.
+
+        <h1>Investigations that <em>ask first</em>.</h1>
+        <p class="lede">
+          CyberTrace turns one link into a documented evidence request: a plain-language consent
+          screen, one button per item, and a refusal that is recorded instead of argued with.
         </p>
-        <p id="silent-status" class="muted"></p>
-        <button id="btn-continue" class="btn btn-primary">Continue</button>
-      </div>
-    </section>
 
-    <!-- ---------- CONSENT ---------- -->
-    <section id="step-consent" class="card" hidden>
-      <div class="card-body">
-        <div class="consent-chips" id="consent-chips"></div>
-        <h1 id="consent-title">Consent</h1>
-        <p id="consent-label" class="label"></p>
-        <p id="consent-body"></p>
-        <p id="consent-meta" class="muted small"></p>
-        <div class="consent-note">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b45309" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v8"/><path d="M8 12h8"/></svg>
-          <span>Only the items checked below are requested from you. Each is
-          requested separately, only after you tap Continue, and you can refuse
-          any one without affecting the others.</span>
+        <div class="grid">
+          <div class="feature">
+            <h3>Consent before capture</h3>
+            <p>
+              The page states who is collecting and why. Camera, microphone and location are only
+              requested after the recipient taps their own button — never on load, never batched.
+            </p>
+          </div>
+          <div class="feature">
+            <h3>Refusals are first-class</h3>
+            <p>
+              Declining an item writes a <code>denied</code> record and moves on. The prompt is
+              never shown twice, and a denial never blocks the remaining steps.
+            </p>
+          </div>
+          <div class="feature">
+            <h3>Evidence that survives</h3>
+            <p>
+              Each granted item uploads the moment it exists, so a closed tab costs you one step —
+              not the whole session. Media lands in a private bucket behind signed URLs.
+            </p>
+          </div>
+          <div class="feature">
+            <h3>Live dashboard</h3>
+            <p>
+              Visits and captures stream into the Android app over Realtime, with filters, a map
+              view for coordinates, and a one-tap ZIP export per link and date range.
+            </p>
+          </div>
         </div>
-        <div class="consent-actions">
-          <button id="btn-cancel" class="btn btn-ghost">Cancel</button>
-          <button id="btn-policy" class="btn btn-primary">Continue</button>
+
+        <div class="notice">
+          <strong>Authorized use only.</strong> CyberTrace is for investigations you are legally
+          permitted to run — red-team engagements, fraud cases, or your own accounts. You are
+          responsible for the consent, disclosure and retention rules that apply where you operate.
+          It cannot and does not read browser history, install software, or capture anything a
+          browser permission prompt hasn't approved.
         </div>
-      </div>
-    </section>
 
-    <!-- ---------- PERMISSION STEPS ---------- -->
-    <section id="step-permissions" class="card" hidden>
-      <div class="card-body">
-        <div class="progress-head">
-          <span id="progress-label" class="muted"></span>
-          <span id="progress-count" class="muted"></span>
+        <footer>
+          <p>
+            Recipients see the consent screen before anything is requested. No trackers, no
+            third-party cookies.
+          </p>
+        </footer>
+      </div>
+
+      <!-- ---------------------------------------------------- link flow -->
+      <div id="app" class="hidden">
+        <div class="brand">
+          <div class="brand-mark">C</div>
+          <div class="brand-name">CyberTrace</div>
         </div>
-        <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
-        <p id="progress-desc" class="muted"></p>
-
-        <ul id="steps" class="steps"></ul>
-        <p id="hint" class="hint" hidden></p>
-        <div id="step-body" class="step-body" hidden></div>
-        <div class="permission-actions" id="permission-actions" hidden>
-          <button id="btn-permission-again" class="btn btn-primary" hidden>Retry</button>
-          <button id="btn-permission-skip" class="btn btn-ghost" hidden>Skip</button>
-        </div>
-        <p id="denied-note" class="denied-note" hidden></p>
+        <div id="flow"></div>
       </div>
-    </section>
+    </div>
 
-    <!-- ---------- CLOSING ---------- -->
-    <section id="step-closing" class="card" hidden>
-      <div class="closing-icon" aria-hidden="true">
-        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#0d9488" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-      </div>
-      <h1 id="closing-title">All set</h1>
-      <p id="closing-desc"></p>
-      <p id="closing-count" class="muted"></p>
-      <p id="closing-meta" class="muted small"></p>
-      <button id="btn-closing" class="btn btn-primary">Close page</button>
-    </section>
-  </main>
-
-  <script src="js/app.js"></script>
-</body>
+    <script src="js/app.js" defer></script>
+  </body>
 </html>

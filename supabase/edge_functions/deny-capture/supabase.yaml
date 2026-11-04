@@ -1,0 +1,7 @@
+deployment:
+  name: deny-capture
+  entrypoint: functions/deny-capture/index.ts
+  config:
+    description: "CyberTrace deny-capture — marks a permission as denied"
+    verify_jwt: false
+    runtime: edge

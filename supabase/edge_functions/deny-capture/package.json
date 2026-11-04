@@ -1,0 +1,9 @@
+{
+  "name": "deny-capture",
+  "version": "1.0.0",
+  "description": "CyberTrace deny-capture Edge Function",
+  "dependencies": {
+    "hono": "^4.6.0",
+    "@supabase/supabase-js": "^2.45.0"
+  }
+}

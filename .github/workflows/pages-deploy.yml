@@ -1,0 +1,42 @@
+name: GitHub Pages Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+env:
+  BUILD_CMD: echo "Static site - skipping framework build"
+  INSTALL_CMD: echo "No dependencies to install"
+
+jobs:
+  build-and-deploy:
+    name: Build and deploy landing page
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: ${{ runner.os == 'Linux' }}
+
+      - name: Upload landing page artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: landing
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

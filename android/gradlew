@@ -28,14 +28,10 @@ APP_HOME="${SCRIPT_FILENAME%/*}"
 # Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
 DEFAULT_JVM_OPTS='-Xmx1g'
 
+# Execute Gradle using the wrapper jar
+exec java ${DEFAULT_JVM_OPTS} ${GRADLE_OPTS} -jar "${WRAPPER_JAR}" ${CMD_LINE_ARGS}
+
 # Use the project's gradle-wrapper.jar
 WRAPPER_JAR="${APP_HOME}/gradle/wrapper/gradle-wrapper.jar"
 WRAPPER_PROPERTIES="${APP_HOME}/gradle/wrapper/gradle-wrapper.properties"
 
-# Load the properties from gradle-wrapper.properties
-if [ -f "${WRAPPER_PROPERTIES}" ]; then
-  . "${WRAPPER_PROPERTIES}"
-fi
-
-# Execute Gradle using the wrapper jar
-DEFAULT_JVM_OPTS='-Xmx1g'

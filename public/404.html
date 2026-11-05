@@ -22,7 +22,7 @@
     <script>
       // Hosts that serve a real 404 for unknown paths deliver this file, which
       // is how /c/<token> reaches the app. Rewrite to the query form and let
-      // app.js take over.
+      // the React app take over.
       (function () {
         var p = location.pathname;
         var i = p.indexOf("/c/");

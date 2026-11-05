@@ -1,10 +1,24 @@
 {
   "name": "cybertrace",
   "private": true,
+  "version": "1.0.0",
   "type": "module",
   "description": "Consent-gated capture page for the CyberTrace dashboard",
   "scripts": {
-    "build": "node scripts/build-landing.mjs",
-    "preview": "node scripts/serve-static.mjs"
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.9.3",
+    "vite": "^5.4.11"
   }
 }

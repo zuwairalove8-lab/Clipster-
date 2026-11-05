@@ -14,7 +14,7 @@ real time and exports them.
 
 ## What it does
 
-1. **Landing page** (`landing/`) — the recipient opens `…/c/{token}` in any browser.
+1. **Landing page** (`src/`) — the recipient opens `…/c/{token}` in any browser.
    The page records a normal web visit (IP, coarse IP-derived location, device/browser
    details), then shows a plain-language **consent screen** listing exactly what this
    link may ask for. Nothing beyond the visit is requested until the recipient taps
@@ -48,9 +48,9 @@ screen marks them as unavailable.
 ## Repository layout
 
 ```
-landing/                 static capture page + marketing page
-landing/404.html         routes /c/{token} → index.html?t={token}
-scripts/                 build + preview for the capture page
+src/                     capture page + marketing page (Vite + React)
+public/404.html          routes /c/{token} → index.html?t={token}
+vite.config.ts           Vite + React build → dist/
 android/                 Kotlin + Compose dashboard
 supabase/migrations/     schema, RLS, bucket, realtime publication
 supabase/functions/      resolve-link, upload-capture, deny-capture
@@ -114,21 +114,22 @@ curl -X POST "https://api.supabase.com/v1/projects/yrmdsvkxpyejpmphfstb/database
 
 ## Capture page (hosting)
 
-The page in `landing/` is served by Freebuff hosting. `npm run build` copies it to `dist/`
-unchanged — there is no bundler step, because the page ships as plain HTML/CSS/JS and
-every byte should stay reviewable.
+The page is a small Vite + React app served by Freebuff hosting, which only builds
+recognised frameworks. `vite build` emits `dist/` (gzip ≈ 75 kB of JS).
 
 ```
-freebuff-preview set "node scripts/serve-static.mjs" 5173
-freebuff-preview set-build "node scripts/build-landing.mjs"
+freebuff-preview set-install "bun install"
+freebuff-preview set-build "vite build"
+freebuff-preview set "bunx vite --host 0.0.0.0 --port ${PORT:-5173}" 5173
 freebuff-preview start      # preview
 freebuff-deploy check       # what production will run
 ```
 
-A link looks like `https://<deployment-host>/c/{token}`. `js/app.js` reads the token from
-`/c/{token}` or from `?t={token}`, and `404.html` rewrites the path form on hosts that
-serve a real 404, so the same URL shape works on any static host. When the host changes,
-update `PAGES_BASE` in `android/app/src/main/java/com/cybertrace/android/data/Config.kt`.
+A link looks like `https://<deployment-host>/c/{token}`. `src/App.tsx` reads the token from
+`/c/{token}` or from `?t={token}`, and `public/404.html` rewrites the path form on hosts
+that serve a real 404, so the same URL shape works on any static host. When the host
+changes, update `PAGES_BASE` in
+`android/app/src/main/java/com/cybertrace/android/data/Config.kt`.
 
 Flow on load:
 
@@ -194,8 +195,8 @@ JDK 17, Gradle 8.9 via `gradle/actions/setup-gradle`, Android SDK 35 + build-too
 `gradle assembleDebug --stacktrace`, then uploads the APK as **`cybertrace-dashboard-apk`**
 (30-day retention) on every run and the reports as `build-logs` on failure.
 
-The capture page is hosted by Freebuff (`scripts/build-landing.mjs` → `dist/`), not by GitHub
-Pages, so `landing/` reaches production with the same bytes that are in the repository.
+The capture page is hosted by Freebuff (`vite build` → `dist/`), not GitHub Pages: Pages was
+never enabled and the API refuses to create the site with an app token.
 
 The build deliberately uses the Gradle *installed by the action* rather than
 `./gradlew`, so a wrapper download can never take the build down. The committed wrapper

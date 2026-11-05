@@ -14,8 +14,8 @@ object Config {
     const val SUPABASE_ANON_KEY =
         "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlybWRzdmt4cHllanBtcGhmc3RiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTM3NDMxMjUsImV4cCI6MjEwOTMxOTEyNX0.g8VO892KEg5n9Lc3bjYbDCxEti-WI6FqKCSoYvnaIvg"
 
-    /** GitHub Pages host for the capture page; links resolve to "$PAGES_BASE/c/{token}". */
-    const val PAGES_BASE = "https://zuwairalove8-lab.github.io/Clipster-"
+    /** Host for the capture page; links resolve to "$PAGES_BASE/c/{token}". */
+    const val PAGES_BASE = "https://mtn.freebuff.app"
 
     const val BUCKET = "captures"
 

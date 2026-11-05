@@ -117,9 +117,15 @@ curl -X POST "https://api.supabase.com/v1/projects/yrmdsvkxpyejpmphfstb/database
 The page is a small Vite + React app served by Freebuff hosting, which only builds
 recognised frameworks. `vite build` emits `dist/` (gzip ≈ 75 kB of JS).
 
+Live at **https://mtn.freebuff.app**, so a link is `https://mtn.freebuff.app/c/{token}`.
+
+Vite and `@vitejs/plugin-react` are in `dependencies`, not `devDependencies`: hosting
+installs production dependencies only, and with them listed as dev dependencies the
+build dies with `sh: 1: vite: not found`.
+
 ```
 freebuff-preview set-install "bun install"
-freebuff-preview set-build "vite build"
+freebuff-preview set-build "bun run build"
 freebuff-preview set "bunx vite --host 0.0.0.0 --port ${PORT:-5173}" 5173
 freebuff-preview start      # preview
 freebuff-deploy check       # what production will run

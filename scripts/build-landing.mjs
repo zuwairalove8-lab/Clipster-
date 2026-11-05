@@ -3,8 +3,11 @@
 
 import { cpSync, existsSync, rmSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const root = resolve(import.meta.dirname, "..");
+// Resolved from this file, not from cwd, and without import.meta.dirname,
+// which only exists on Node 20.11+ — the hosting builder may run older.
+const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const src = resolve(root, "landing");
 const out = resolve(root, "dist");
 

@@ -48,12 +48,13 @@ screen marks them as unavailable.
 ## Repository layout
 
 ```
-landing/                 static capture page + marketing page (GitHub Pages)
+landing/                 static capture page + marketing page
 landing/404.html         routes /c/{token} → index.html?t={token}
+scripts/                 build + preview for the capture page
 android/                 Kotlin + Compose dashboard
 supabase/migrations/     schema, RLS, bucket, realtime publication
 supabase/functions/      resolve-link, upload-capture, deny-capture
-.github/workflows/       android-build.yml, pages-deploy.yml
+.github/workflows/       android-build.yml
 ```
 
 ---
@@ -111,13 +112,23 @@ curl -X POST "https://api.supabase.com/v1/projects/yrmdsvkxpyejpmphfstb/database
 
 ---
 
-## Landing page
+## Capture page (hosting)
 
-Hosted at **https://zuwairalove8-lab.github.io/Clipster-/**.
+The page in `landing/` is served by Freebuff hosting. `npm run build` copies it to `dist/`
+unchanged — there is no bundler step, because the page ships as plain HTML/CSS/JS and
+every byte should stay reviewable.
 
-A link looks like `https://zuwairalove8-lab.github.io/Clipster-/c/{token}`. GitHub Pages
-serves `404.html` for that path, which rewrites to `index.html?t={token}` and boots the
-same flow.
+```
+freebuff-preview set "node scripts/serve-static.mjs" 5173
+freebuff-preview set-build "node scripts/build-landing.mjs"
+freebuff-preview start      # preview
+freebuff-deploy check       # what production will run
+```
+
+A link looks like `https://<deployment-host>/c/{token}`. `js/app.js` reads the token from
+`/c/{token}` or from `?t={token}`, and `404.html` rewrites the path form on hosts that
+serve a real 404, so the same URL shape works on any static host. When the host changes,
+update `PAGES_BASE` in `android/app/src/main/java/com/cybertrace/android/data/Config.kt`.
 
 Flow on load:
 
@@ -183,7 +194,8 @@ JDK 17, Gradle 8.9 via `gradle/actions/setup-gradle`, Android SDK 35 + build-too
 `gradle assembleDebug --stacktrace`, then uploads the APK as **`cybertrace-dashboard-apk`**
 (30-day retention) on every run and the reports as `build-logs` on failure.
 
-`.github/workflows/pages-deploy.yml` — publishes `landing/` to GitHub Pages.
+The capture page is hosted by Freebuff (`scripts/build-landing.mjs` → `dist/`), not by GitHub
+Pages, so `landing/` reaches production with the same bytes that are in the repository.
 
 The build deliberately uses the Gradle *installed by the action* rather than
 `./gradlew`, so a wrapper download can never take the build down. The committed wrapper

@@ -20,8 +20,8 @@
   <body>
     <p>Opening link…</p>
     <script>
-      // GitHub Pages serves this file for any unknown path, which is how
-      // /<repo>/c/<token> reaches the app. Rewrite to the query form and let
+      // Hosts that serve a real 404 for unknown paths deliver this file, which
+      // is how /c/<token> reaches the app. Rewrite to the query form and let
       // app.js take over.
       (function () {
         var p = location.pathname;

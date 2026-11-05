@@ -1,0 +1,10 @@
+{
+  "name": "cybertrace",
+  "private": true,
+  "type": "module",
+  "description": "Consent-gated capture page for the CyberTrace dashboard",
+  "scripts": {
+    "build": "node scripts/build-landing.mjs",
+    "preview": "node scripts/serve-static.mjs"
+  }
+}
